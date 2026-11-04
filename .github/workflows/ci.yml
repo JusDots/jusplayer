@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check the gateway
+        run: |
+          node --check server/router.mjs
+          node --check server/index.mjs
+          node --check server/auth.mjs
+          node --check api/gateway.mjs
+          node --check scripts/build-web.mjs
+
+      - name: Compile the shared, web and desktop targets
+        run: ./gradlew :shared:compileKotlinDesktop :web:compileKotlinWasmJs :windows:compileKotlin :linux:compileKotlin --console=plain
+
+      - name: Build the web bundle
+        run: ./gradlew :web:wasmJsBrowserDistribution --console=plain
+
+      - name: Stage the bundle (as Vercel would)
+        run: node scripts/build-web.mjs
+        env:
+          JUSPLAYER_PREBUILT: '1'

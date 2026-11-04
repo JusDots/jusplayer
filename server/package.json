@@ -1,0 +1,14 @@
+{
+  "name": "jusplayer-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-dependency Node gateway for JusPlayer: YouTube Music InnerTube, artwork proxy, static Wasm host",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "dev": "node --watch index.mjs"
+  }
+}

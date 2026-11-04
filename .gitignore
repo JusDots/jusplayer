@@ -1,0 +1,20 @@
+.gradle/
+.kotlin/
+build/
+*/build/
+out/
+.idea/
+*.iml
+local.properties
+.DS_Store
+node_modules/
+*.log
+.env
+
+# Vercel
+.vercel/
+public/
+
+# Local secrets / session data
+.env.local
+*.local

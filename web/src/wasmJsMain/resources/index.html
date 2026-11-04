@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#06100b">
+    <meta name="description" content="JusPlayer for the web — a private, fast YouTube Music client built with Kotlin and Compose Multiplatform.">
+    <title>JusPlayer</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%236EE7A8'/%3E%3Cpath d='M44 72V34l24-6v10L54 42v30a10 10 0 1 1-10-10z' fill='%2306100b'/%3E%3C/svg%3E">
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #06100b;
+            color: #e6f4eb;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        #yt-audio-host {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 2px;
+            height: 2px;
+            opacity: 0.02;
+            pointer-events: none;
+            z-index: -1;
+            overflow: hidden;
+        }
+
+        #boot {
+            position: fixed;
+            inset: 0;
+            display: grid;
+            place-content: center;
+            justify-items: center;
+            gap: 18px;
+            background: radial-gradient(circle at 50% 40%, #143b29, #06100b 70%);
+            z-index: 50;
+            transition: opacity .5s ease;
+        }
+
+        #boot.hidden { opacity: 0; pointer-events: none; }
+
+        .boot-logo {
+            width: 76px;
+            height: 76px;
+            border-radius: 50%;
+            background: #6ee7a8;
+            display: grid;
+            place-content: center;
+            box-shadow: 0 18px 60px rgba(110, 231, 168, .35);
+            animation: pulse 1.8s ease-in-out infinite;
+        }
+
+        .boot-title { font-size: 22px; font-weight: 700; letter-spacing: -.4px; }
+        .boot-sub { font-size: 12.5px; color: #9db4a6; letter-spacing: .12em; text-transform: uppercase; }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.06); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .boot-logo { animation: none; }
+            #boot { transition: none; }
+        }
+    </style>
+
+    <script>
+        // The Gradle dev server runs on :8080 while the gateway runs on :8787.
+        // In production the gateway serves this page, so relative URLs are used.
+        window.JUS_API_BASE = window.location.port === "8080" ? "http://localhost:8787" : "";
+    </script>
+
+    <script>
+        /**
+         * JusPlayer audio bridge.
+         *
+         * Playback is delegated to YouTube's official IFrame Player API — no stream
+         * URLs are extracted or proxied. Kotlin/Wasm polls this small surface.
+         */
+        (function () {
+            let apiReady = false;
+            let player = null;
+            let playerReady = false;
+            let pendingId = null;
+            let ended = false;
+            let lastError = null;
+            let volume = 0.8;
+            let rate = 1;
+
+            const host = document.createElement("div");
+            host.id = "yt-audio-host";
+            const mount = document.createElement("div");
+            host.appendChild(mount);
+
+            function mountHost() {
+                if (!host.isConnected && document.body) document.body.appendChild(host);
+            }
+
+            /**
+             * Extract a usable dominant colour from artwork for the dynamic theme.
+             * Artwork is served same-origin through /api/img, so the canvas stays clean.
+             */
+            function extractArtworkColor(url) {
+                window.jusArtworkColor = 0;
+                if (!url) return;
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.onload = function () {
+                    try {
+                        const canvas = document.createElement("canvas");
+                        const size = 32;
+                        canvas.width = size;
+                        canvas.height = size;
+                        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+                        ctx.drawImage(img, 0, 0, size, size);
+                        const data = ctx.getImageData(0, 0, size, size).data;
+                        // Bucket colourful, non-black pixels and pick the most popular bucket.
+                        const buckets = new Map();
+                        for (let i = 0; i < data.length; i += 4) {
+                            const r = data[i], g = data[i + 1], b = data[i + 2];
+                            const max = Math.max(r, g, b), min = Math.min(r, g, b);
+                            if (max < 46 || max - min < 16) continue;
+                            const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+                            const bucket = buckets.get(key) || { r: 0, g: 0, b: 0, n: 0 };
+                            bucket.r += r; bucket.g += g; bucket.b += b; bucket.n += 1;
+                            buckets.set(key, bucket);
+                        }
+                        let best = null;
+                        for (const bucket of buckets.values()) {
+                            if (!best || bucket.n > best.n) best = bucket;
+                        }
+                        if (best && best.n > 0) {
+                            window.jusArtworkColor =
+                                ((Math.round(best.r / best.n) << 16) |
+                                 (Math.round(best.g / best.n) << 8) |
+                                 Math.round(best.b / best.n)) >>> 0;
+                        }
+                    } catch (e) {
+                        window.jusArtworkColor = 0;
+                    }
+                };
+                img.onerror = function () { window.jusArtworkColor = 0; };
+                img.src = url;
+            }
+
+            function createPlayer(videoId) {
+                mountHost();
+                player = new YT.Player(mount, {
+                    height: "180",
+                    width: "320",
+                    videoId: videoId,
+                    playerVars: {
+                        autoplay: 1,
+                        controls: 0,
+                        disablekb: 1,
+                        fs: 0,
+                        playsinline: 1,
+                        rel: 0,
+                        iv_load_policy: 3,
+                        modestbranding: 1,
+                        origin: window.location.origin
+                    },
+                    events: {
+                        onReady: function () {
+                            playerReady = true;
+                            player.setVolume(volume * 100);
+                            if (player.setPlaybackRate) player.setPlaybackRate(rate);
+                            if (pendingId) {
+                                const id = pendingId;
+                                pendingId = null;
+                                player.loadVideoById(id);
+                            } else {
+                                player.playVideo();
+                            }
+                        },
+                        onStateChange: function (event) {
+                            if (event.data === 0) {
+                                ended = true;
+                            }
+                        },
+                        onError: function (event) {
+                            lastError = "YouTube player error " + event.data;
+                            console.warn("[jusPlayer]", lastError);
+                            // 101/150 = embedding disabled; skip instead of hanging the queue.
+                            if (event.data === 101 || event.data === 150 || event.data === 100) {
+                                ended = true;
+                            }
+                        }
+                    }
+                });
+            }
+
+            window.onYouTubeIframeAPIReady = function () {
+                apiReady = true;
+                if (pendingId) {
+                    const id = pendingId;
+                    pendingId = null;
+                    createPlayer(id);
+                }
+            };
+
+            window.jusPlayer = {
+                load: function (videoId) {
+                    ended = false;
+                    lastError = null;
+                    playerReady = false;
+                    if (!apiReady || !window.YT || !window.YT.Player) {
+                        pendingId = videoId;
+                        return;
+                    }
+                    if (!player) {
+                        createPlayer(videoId);
+                    } else {
+                        player.loadVideoById(videoId);
+                        if (player.setPlaybackRate) player.setPlaybackRate(rate);
+                    }
+                },
+                play: function () {
+                    if (player && player.playVideo) player.playVideo();
+                },
+                pause: function () {
+                    if (player && player.pauseVideo) player.pauseVideo();
+                },
+                seek: function (seconds) {
+                    if (player && player.seekTo) player.seekTo(Math.max(0, seconds), true);
+                },
+                setVolume: function (value) {
+                    volume = Math.max(0, Math.min(1, value));
+                    if (player && player.setVolume) player.setVolume(volume * 100);
+                },
+                setRate: function (value) {
+                    rate = Math.max(0.25, Math.min(2, value));
+                    if (player && player.setPlaybackRate) player.setPlaybackRate(rate);
+                },
+                setMetadata: function (title, artist, artwork) {
+                    extractArtworkColor(artwork ? new URL(artwork, window.location.href).href : null);
+                    if (!("mediaSession" in navigator)) return;
+                    try {
+                        navigator.mediaSession.metadata = new MediaMetadata({
+                            title: title || "JusPlayer",
+                            artist: artist || "YouTube Music",
+                            album: "JusPlayer",
+                            artwork: artwork ? [{ src: new URL(artwork, window.location.href).href, sizes: "512x512" }] : []
+                        });
+                        navigator.mediaSession.setActionHandler("play", function () {
+                            if (player && player.playVideo) player.playVideo();
+                        });
+                        navigator.mediaSession.setActionHandler("pause", function () {
+                            if (player && player.pauseVideo) player.pauseVideo();
+                        });
+                        navigator.mediaSession.setActionHandler("seekto", function (details) {
+                            if (player && player.seekTo && typeof details.seekTime === "number") {
+                                player.seekTo(details.seekTime, true);
+                            }
+                        });
+                    } catch (e) { /* media session is best effort */ }
+                },
+                position: function () {
+                    try { return player && player.getCurrentTime ? player.getCurrentTime() : 0; }
+                    catch (e) { return 0; }
+                },
+                duration: function () {
+                    try { return player && player.getDuration ? player.getDuration() : 0; }
+                    catch (e) { return 0; }
+                },
+                isPlaying: function () {
+                    try { return !!(player && player.getPlayerState && player.getPlayerState() === 1); }
+                    catch (e) { return false; }
+                },
+                ready: function () {
+                    return !!(apiReady && player && playerReady);
+                },
+                consumeEnded: function () {
+                    const value = ended;
+                    ended = false;
+                    return value;
+                },
+                error: function () { return lastError; }
+            };
+
+            mountHost();
+        })();
+    </script>
+
+    <script src="https://www.youtube.com/iframe_api"></script>
+</head>
+<body>
+    <div id="boot">
+        <div class="boot-logo">
+            <svg width="38" height="38" viewBox="0 0 100 100" aria-hidden="true">
+                <path d="M40 76V32l28-7v12L52 43v33a10 10 0 1 1-12-10z" fill="#06100b"/>
+            </svg>
+        </div>
+        <div class="boot-title">JusPlayer</div>
+        <div class="boot-sub">Warming up the goblins</div>
+    </div>
+
+    <script>
+        // Fade the splash once Compose has had a moment to attach its canvas.
+        window.addEventListener("load", function () {
+            setTimeout(function () {
+                const boot = document.getElementById("boot");
+                if (boot) {
+                    boot.classList.add("hidden");
+                    setTimeout(function () { boot.remove(); }, 600);
+                }
+            }, 700);
+        });
+    </script>
+
+    <script src="jusplayer.js"></script>
+</body>
+</html>
