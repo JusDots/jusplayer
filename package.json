@@ -13,6 +13,7 @@
     "dev": "npm --prefix server start",
     "dev:gateway": "npm --prefix server run dev",
     "vercel:dev": "npx vercel dev",
-    "deploy": "npx vercel deploy --prod"
+    "deploy": "npx vercel build --prod --yes && npx vercel deploy --prebuilt --prod",
+    "setup:oauth": "node scripts/enable-google-signin.mjs"
   }
 }

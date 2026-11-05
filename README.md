@@ -151,13 +151,20 @@ the GitHub workflow instead (below).
 
 Create a **Web application** in the
 [Google Cloud console](https://console.cloud.google.com/apis/credentials) and
-add this authorised redirect URI:
+add this authorised redirect URI (and JavaScript origin):
 
 ```
-https://<your-domain>/api/auth/callback
+https://jusplayer.vercel.app/api/auth/callback
 ```
 
-Then add the credentials to the project:
+Then hand the credentials to the helper — it stores them on Vercel and
+redeploys:
+
+```bash
+npm run setup:oauth -- <client-id> <client-secret>
+```
+
+Or do it by hand:
 
 ```bash
 npx vercel env add YT_CLIENT_ID production

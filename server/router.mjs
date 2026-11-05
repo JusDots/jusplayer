@@ -959,6 +959,21 @@ function redirect(res, location, headers = {}) {
 }
 
 /**
+ * The public origin of the request.
+ *
+ * Behind Vercel (or any proxy) the socket protocol is plain http, so the
+ * real scheme and host arrive in `x-forwarded-proto` / `x-forwarded-host`.
+ * Google matches the OAuth redirect URI byte for byte, so this has to be
+ * right or the sign-in fails with "redirect_uri_mismatch".
+ */
+function requestOrigin(req, url) {
+  const first = (value) => String(value || "").split(",")[0].trim();
+  const proto = first(req.headers["x-forwarded-proto"]) || url.protocol.replace(":", "");
+  const host = first(req.headers["x-forwarded-host"]) || url.host;
+  return `${proto}://${host}`;
+}
+
+/**
  * The one entry point used by both the local Node server and the Vercel
  * function. `options.static` turns the built Wasm app on; on Vercel the files
  * are served straight from `public/` instead.
@@ -966,6 +981,9 @@ function redirect(res, location, headers = {}) {
 export async function handleRequest(req, res, options = {}) {
   const withStatic = options.static !== false;
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const origin = requestOrigin(req, url);
+  const isSecure = origin.startsWith("https:");
+  const redirectUri = process.env.YT_REDIRECT_URI || `${origin}/api/auth/callback`;
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, CORS).end();
@@ -992,11 +1010,9 @@ export async function handleRequest(req, res, options = {}) {
         });
       }
       const state = oauthState();
-      const redirectUri =
-        process.env.YT_REDIRECT_URI || `${url.protocol}//${url.host}/api/auth/callback`;
       res.setHeader(
         "set-cookie",
-        sessionCookieHeader(state, { secure: url.protocol === "https:", maxAge: 10 * 60 * 1000 }),
+        sessionCookieHeader(state, { secure: isSecure, maxAge: 10 * 60 * 1000 }),
       );
       return redirect(res, oauthUrl({ clientId: process.env.YT_CLIENT_ID, redirectUri, state }));
     }
@@ -1015,8 +1031,7 @@ export async function handleRequest(req, res, options = {}) {
           code,
           clientId: process.env.YT_CLIENT_ID,
           clientSecret: process.env.YT_CLIENT_SECRET,
-          redirectUri:
-            process.env.YT_REDIRECT_URI || `${url.protocol}//${url.host}/api/auth/callback`,
+          redirectUri,
         });
         const cookie = await youtubeCookieFromToken(tokens.access_token);
         const profile = await fetchUserInfo(tokens.access_token);
@@ -1027,7 +1042,7 @@ export async function handleRequest(req, res, options = {}) {
         );
         res.setHeader(
           "set-cookie",
-          sessionCookieHeader(session, { secure: url.protocol === "https:" }),
+          sessionCookieHeader(session, { secure: isSecure }),
         );
         return redirect(res, "/?signin=ok");
       } catch (err) {
@@ -1037,7 +1052,7 @@ export async function handleRequest(req, res, options = {}) {
     }
 
     if (url.pathname === "/api/auth/logout") {
-      res.setHeader("set-cookie", clearSessionCookieHeader({ secure: url.protocol === "https:" }));
+      res.setHeader("set-cookie", clearSessionCookieHeader({ secure: isSecure }));
       if (url.searchParams.get("json") === "1") {
         return sendJson(res, 200, { signedIn: false });
       }
@@ -1071,7 +1086,7 @@ export async function handleRequest(req, res, options = {}) {
       const session = createSession(cookie, {}, SECRET);
       res.setHeader(
         "set-cookie",
-        sessionCookieHeader(session, { secure: url.protocol === "https:" }),
+        sessionCookieHeader(session, { secure: isSecure }),
       );
       const info = await accountInfo(cookie);
       return sendJson(res, 200, { ...info, method: "cookie" });
