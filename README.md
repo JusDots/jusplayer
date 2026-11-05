@@ -112,6 +112,8 @@ audio engine (Media3-JVM, VLCJ or a JCEF YouTube view) is the next desktop step.
 
 ## Deploy to Vercel (live site)
 
+**Live now:** <https://jusplayer.vercel.app>
+
 The web build is a static bundle plus one serverless function:
 
 ```
@@ -135,12 +137,15 @@ Without it the app still runs, but sessions only survive on a single instance.
 
 ```bash
 npm run build        # compiles the Wasm client into public/
-npx vercel deploy --prod
+npx vercel build --prod --yes
+npx vercel deploy --prebuilt --prod
 ```
 
 `npm run build` runs `./gradlew :web:wasmJsBrowserDistribution` (needs JDK 21)
-and copies the result into `public/`. If you would rather not install a JDK on
-the machine that deploys, use the GitHub workflow instead (below).
+and copies the result into `public/`. The `vercel build` step has to use the
+same target as the deploy (`--prod`), otherwise Vercel refuses the prebuilt
+output. If you would rather not install a JDK on the machine that deploys, use
+the GitHub workflow instead (below).
 
 ### 3. Optional: Google sign-in
 
@@ -192,6 +197,11 @@ account name, liked songs, library, history and a personalised home feed.
 
 Without an account everything still works — the home feed falls back to curated
 public shelves.
+
+> **Current deployment:** the live site at <https://jusplayer.vercel.app> has
+> `JUSPLAYER_SECRET` set but no Google OAuth client yet, so *Settings → Account*
+> offers the cookie sign-in only. Add `YT_CLIENT_ID` / `YT_CLIENT_SECRET` (and
+> redeploy) to switch on the one-click *Sign in with Google* button.
 
 ---
 
