@@ -1,0 +1,16 @@
+{
+  "name": "jusplayer-tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JusPlayer terminal client — talks to the same gateway as the web and desktop apps",
+  "type": "module",
+  "bin": {
+    "jusplayer": "./src/main.mjs"
+  },
+  "scripts": {
+    "start": "node src/main.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

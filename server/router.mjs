@@ -18,6 +18,7 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   SESSION_COOKIE,
   authHeaders,
@@ -31,7 +32,9 @@ import {
   oauthUrl,
   parseCookies,
   sessionCookieHeader,
+  streamToken,
   verifySession,
+  verifyStreamToken,
   youtubeCookieFromToken,
 } from "./auth.mjs";
 
@@ -96,15 +99,16 @@ async function bootstrap(force = false) {
 }
 
 async function innertube(endpoint, body, opts = {}) {
-  const { auth = null, retried = false } = opts;
+  const { auth = null, retried = false, client = null } = opts;
   const cfg = await bootstrap();
   const url = `https://music.youtube.com/youtubei/v1/${endpoint}?key=${cfg.key}&prettyPrint=false`;
+  const chosen = client ? { ...client } : { clientName: "WEB_REMIX", clientVersion: cfg.version };
   const headers = {
     "content-type": "application/json",
-    "user-agent": UA,
+    "user-agent": chosen.userAgent || UA,
     "accept-language": "en-US,en;q=0.9",
-    "x-youtube-client-name": "67",
-    "x-youtube-client-version": cfg.version,
+    "x-youtube-client-name": chosen.clientName,
+    "x-youtube-client-version": chosen.clientVersion,
     origin: "https://music.youtube.com",
     referer: "https://music.youtube.com/",
   };
@@ -121,8 +125,8 @@ async function innertube(endpoint, body, opts = {}) {
   const payload = {
     context: {
       client: {
-        clientName: "WEB_REMIX",
-        clientVersion: cfg.version,
+        clientName: chosen.clientName,
+        clientVersion: chosen.clientVersion,
         hl: "en",
         gl: "US",
         visitorData: cfg.visitor,
@@ -149,6 +153,87 @@ async function innertube(endpoint, body, opts = {}) {
   }
   return res.json();
 }
+
+/**
+ * InnerTube clients.
+ *
+ * `WEB_REMIX` is what the web app itself uses and only ever returns
+ * storyboard/metadata. The mobile clients are the ones that hand back
+ * *direct, unciphered* audio URLs — that is what powers native playback on
+ * desktop, offline downloads and the audio DSP chain.
+ *
+ * Not every client works for every track: some CDN URLs are signed for one
+ * client only and answer 403 for the others, so the resolver tries them in
+ * turn and keeps the first URL that actually plays.
+ */
+const ANDROID_CLIENT = {
+  clientName: "ANDROID",
+  clientVersion: "20.10.38",
+  userAgent:
+    "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+};
+const IOS_CLIENT = {
+  clientName: "IOS",
+  clientVersion: "20.10.4",
+  userAgent:
+    "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+};
+const ANDROID_VR_CLIENT = {
+  clientName: "ANDROID_VR",
+  clientVersion: "1.62.27",
+  userAgent:
+    "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12; en_US) gzip",
+};
+const AUDIO_CLIENTS = [ANDROID_CLIENT, IOS_CLIENT, ANDROID_VR_CLIENT];
+
+// ---------------------------------------------------------------- yt-dlp ---
+
+let ytDlpState = null;
+
+/** Is yt-dlp installed? It is the only way to get unrestricted stream URLs. */
+export function ytDlpAvailable() {
+  if (ytDlpState === null) {
+    try {
+      ytDlpState =
+        spawnSync("yt-dlp", ["--version"], { encoding: "utf8", timeout: 10_000 }).status === 0;
+    } catch {
+      ytDlpState = false;
+    }
+  }
+  return ytDlpState;
+}
+
+/**
+ * Resolve a stream URL with yt-dlp.
+ *
+ * YouTube limits the URLs that the plain InnerTube clients hand out to about
+ * one megabyte per request. yt-dlp solves YouTube's JavaScript challenge and
+ * uses a client whose URLs have no such limit — so when it is installed the
+ * gateway can serve whole tracks (and therefore offline downloads).
+ */
+function resolveWithYtDlp(videoId) {
+  if (!ytDlpAvailable()) return null;
+  const result = spawnSync(
+    "yt-dlp",
+    [
+      "--no-playlist",
+      "--no-warnings",
+      "--no-progress",
+      "-f",
+      "140/bestaudio[ext=m4a]/bestaudio",
+      "-g",
+      `https://www.youtube.com/watch?v=${videoId}`,
+    ],
+    { encoding: "utf8", timeout: 90_000 },
+  );
+  if (result.status !== 0) return null;
+  const url = String(result.stdout || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("http"));
+  return url || null;
+}
+
 
 /** Short, stable id for a signed-in user — used to keep caches separate. */
 function userKey(auth) {
@@ -866,6 +951,252 @@ async function proxyImage(target) {
   };
 }
 
+// --------------------------------------------------------------------- audio ---
+
+/**
+ * Resolve a playable audio stream for a video.
+ *
+ * The mobile InnerTube clients return *direct* audio URLs (no signature
+ * cipher), which is what lets the desktop app and the TUI play audio
+ * natively, and what lets the web app cache tracks for offline listening.
+ *
+ * The returned URL is short-lived (Google expires them after a few hours),
+ * so callers should resolve it again when a track starts rather than storing
+ * it forever.
+ */
+async function resolveAudio(videoId, auth = null) {
+  const attempts = await Promise.allSettled(
+    AUDIO_CLIENTS.map((client) =>
+      innertube(
+        "player",
+        { videoId, contentCheckOk: true, racyCheckOk: true },
+        { auth, client },
+      ),
+    ),
+  );
+
+  const candidates = [];
+  let firstError = null;
+
+  for (const attempt of attempts) {
+    if (attempt.status !== "fulfilled") {
+      firstError = firstError || attempt.reason;
+      continue;
+    }
+    const data = attempt.value;
+    const status = data.playabilityStatus?.status;
+    if (status && status !== "OK") {
+      const reason =
+        data.playabilityStatus?.reason ||
+        data.playabilityStatus?.errorScreen?.playerErrorMessageRenderer?.subreason?.runs
+          ?.map((r) => r.text)
+          .join("") ||
+        "not playable";
+      firstError = firstError || new Error(`YouTube says this track is ${status}: ${reason}`);
+      continue;
+    }
+
+    const formats = [
+      ...(data.streamingData?.adaptiveFormats || []),
+      ...(data.streamingData?.formats || []),
+    ].filter((f) => f.mimeType?.startsWith("audio/") && f.url);
+
+    // Prefer AAC/M4A: every desktop audio stack understands it, while Opus
+    // in WebM needs a separate decoder.
+    const rank = (format) => {
+      const mime = format.mimeType || "";
+      let score = 0;
+      if (mime.includes("mp4a")) score += 100;
+      if (mime.includes("opus")) score += 40;
+      if (mime.includes("mp4")) score += 20;
+      score += Math.min(40, Math.round((format.bitrate || 0) / 5000));
+      return score;
+    };
+
+    for (const format of formats.sort((a, b) => rank(b) - rank(a)).slice(0, 2)) {
+      candidates.push({
+        url: format.url,
+        mimeType: format.mimeType,
+        bitrate: format.bitrate || 0,
+        approxBytes: format.contentLength ? Number(format.contentLength) : 0,
+      });
+    }
+
+    if (!candidates.length) {
+      firstError = firstError || new Error("YouTube did not return an audio stream for this track");
+    }
+    if (candidates.length) {
+      const details = data.videoDetails || {};
+      candidates.forEach((candidate) => {
+        candidate.duration = Number(details.lengthSeconds || 0);
+        candidate.title = details.title || "";
+        candidate.author = details.author || "";
+        candidate.thumbnail = details.thumbnail?.thumbnails?.slice(-1)[0]?.url || "";
+      });
+      break;
+    }
+  }
+
+  if (!candidates.length) {
+    throw firstError || new Error("YouTube did not return an audio stream for this track");
+  }
+
+  // Some CDN URLs are signed for one client only and answer 403 for the
+  // others — so probe each candidate and keep the first that really plays.
+  const verified = await Promise.all(
+    candidates.map(async (candidate) => {
+      const client = AUDIO_CLIENTS.find(
+        (entry) => candidate.url.includes(`c=${entry.clientName}`) || entry === ANDROID_CLIENT,
+      );
+      const userAgent = client?.userAgent || ANDROID_CLIENT.userAgent;
+      try {
+        const probe = await fetch(candidate.url, {
+          headers: { "user-agent": userAgent, range: "bytes=0-2047" },
+          signal: AbortSignal.timeout(15_000),
+        });
+        const ok = probe.status === 200 || probe.status === 206;
+        await probe.body?.cancel();
+        return ok ? { ...candidate, userAgent } : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  let best = verified.find(Boolean);
+  if (!best) {
+    throw new Error("YouTube returned audio links, but none of them could be played");
+  }
+
+  // The plain InnerTube URLs only allow about a megabyte per request. If
+  // yt-dlp is around, ask it for a link without that limit so whole tracks
+  // (and offline downloads) work.
+  const size = best.approxBytes || 0;
+  if (size > 1024 * 1024) {
+    const unrestricted = resolveWithYtDlp(videoId);
+    if (unrestricted) {
+      try {
+        const probe = await fetch(unrestricted, {
+          headers: { range: "bytes=0-2047" },
+          signal: AbortSignal.timeout(20_000),
+        });
+        const ok = probe.status === 200 || probe.status === 206;
+        await probe.body?.cancel();
+        if (ok) {
+          best = { ...best, url: unrestricted, userAgent: ANDROID_CLIENT.userAgent, unrestricted: true };
+        }
+      } catch {
+        /* keep the InnerTube link */
+      }
+    }
+  }
+
+  return {
+    videoId,
+    url: best.url,
+    mimeType: best.mimeType,
+    bitrate: best.bitrate || 0,
+    approxBytes: best.approxBytes || 0,
+    duration: best.duration || 0,
+    title: best.title || "",
+    author: best.author || "",
+    thumbnail: best.thumbnail || "",
+    userAgent: best.userAgent || ANDROID_CLIENT.userAgent,
+    expiresIn: 6 * 60 * 60,
+  };
+}
+
+/** Pick a filesystem-safe name for a downloaded track. */
+function audioFilename(info) {
+  const safe = (value) =>
+    String(value || "")
+      .replace(/[\\/:*?"<>|]+/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+  const name = `${safe(info.author) ? `${safe(info.author)} - ` : ""}${safe(info.title) || info.videoId}`;
+  return `${name.replace(/[^\w\- .()[\]]/g, "_")}.m4a`;
+}
+
+/**
+ * Proxy the audio bytes through the gateway.
+ *
+ * Same-origin bytes mean the browser can decode them, cache them for
+ * offline use and — most importantly — route them through the Web Audio API
+ * so the equaliser, crossfade and spatial controls actually work.
+ */
+async function proxyAudio(req, res, info, { download = false } = {}) {
+  // YouTube's signed CDN URLs only answer to an *explicit, bounded* range:
+  // "bytes=0-" or no range at all comes back as 403. So we always send one
+  // and translate the client's intent ourselves.
+  const total = info.approxBytes || 0;
+  const requested = req.headers.range || "";
+  const openEnded = /^bytes=(\d*)-$/.exec(requested);
+  const clientWantsRange = Boolean(requested) && !openEnded;
+
+  const headers = { "user-agent": info.userAgent || ANDROID_CLIENT.userAgent };
+  if (openEnded) {
+    const start = Number(openEnded[1] || 0);
+    headers.range = total
+      ? `bytes=${start}-${Math.max(start, total - 1)}`
+      : `bytes=${start}-${start + 32 * 1024 * 1024 - 1}`;
+  } else if (requested) {
+    headers.range = requested;
+  } else {
+    headers.range = total
+      ? `bytes=0-${total - 1}`
+      : "bytes=0-33554431";
+  }
+
+  const upstream = await fetch(info.url, {
+    headers,
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!upstream.ok && upstream.status !== 206) {
+    throw new Error(`Audio stream -> HTTP ${upstream.status}`);
+  }
+
+  const responseHeaders = {
+    "content-type": info.mimeType,
+    "accept-ranges": "bytes",
+    "cache-control": "private, max-age=3600",
+    ...CORS,
+  };
+
+  // We always ask YouTube for a bounded range. If the client did not ask
+  // for a range, we serve the whole track as a normal 200 response.
+  const upstreamRange = upstream.headers.get("content-range") || "";
+  if (clientWantsRange && upstream.status === 206) {
+    responseHeaders["content-range"] = upstreamRange;
+  }
+  if (upstream.headers.get("content-length")) {
+    responseHeaders["content-length"] = upstream.headers.get("content-length");
+  } else if (total) {
+    responseHeaders["content-length"] = String(total);
+  }
+  if (download) {
+    responseHeaders["content-disposition"] = `attachment; filename="${audioFilename(info)}"`;
+  }
+
+  const status = clientWantsRange && upstream.status === 206 ? 206 : 200;
+  res.writeHead(status, responseHeaders);
+  if (!upstream.body) return res.end();
+  const reader = upstream.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!res.write(Buffer.from(value))) {
+        await new Promise((resolve) => res.once("drain", resolve));
+      }
+    }
+  } catch {
+    /* the client went away — nothing to do */
+  }
+  res.end();
+}
+
 // -------------------------------------------------------------------- static ---
 
 const MIME = {
@@ -1068,6 +1399,41 @@ export async function handleRequest(req, res, options = {}) {
         method: cookie ? "cookie" : null,
         oauthAvailable: oauthConfigured(),
       });
+    }
+
+    // ---------------------------------------------------------------- audio ---
+
+    // The direct stream URL — used by the desktop app and the TUI to play
+    // audio natively, without a browser in the loop.
+    if (url.pathname === "/api/stream") {
+      const videoId = url.searchParams.get("videoId") || "";
+      if (!videoId) return sendJson(res, 400, { error: "missing videoId" });
+      const auth = sessionCookie(req);
+      const value = await cached(`stream:${videoId}`, 30 * 60_000, () => resolveAudio(videoId, auth));
+      return sendJson(res, 200, {
+        ...value,
+        // A signed, short-lived URL so external players (mpv, VLC) can pull
+        // the bytes through the gateway without needing the session cookie.
+        proxyUrl: `/api/audio?token=${encodeURIComponent(streamToken(videoId, SECRET))}`,
+        // For players that can resolve YouTube themselves (mpv + yt-dlp).
+        watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+      });
+    }
+
+    // The audio bytes themselves, proxied same-origin so the browser can
+    // decode, cache and process them.
+    if (url.pathname === "/api/audio" || url.pathname === "/api/download") {
+      const token = url.searchParams.get("token") || "";
+      const tokenVideoId = token ? verifyStreamToken(token, SECRET) : null;
+      if (token && !tokenVideoId) {
+        return sendJson(res, 401, { error: "this stream link has expired" });
+      }
+      const videoId = tokenVideoId || url.searchParams.get("videoId") || "";
+      if (!videoId) return sendJson(res, 400, { error: "missing videoId" });
+      const auth = sessionCookie(req);
+      const info = await cached(`stream:${videoId}`, 30 * 60_000, () => resolveAudio(videoId, auth));
+      await proxyAudio(req, res, info, { download: url.pathname === "/api/download" });
+      return;
     }
 
     if (url.pathname === "/api/auth/cookie" && req.method === "POST") {

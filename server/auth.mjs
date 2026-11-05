@@ -152,6 +152,41 @@ export function createSession(ytCookie, extra = {}, secret) {
   );
 }
 
+// -------------------------------------------------------------- stream token --
+
+/**
+ * A short-lived signed token for one track.
+ *
+ * Audio players (mpv, VLC, the desktop app) cannot carry the session cookie,
+ * and YouTube's own CDN URLs reject unknown User-Agents. A stream token lets
+ * a player fetch the bytes through the gateway — same origin, correct
+ * headers, and the user's session applied server-side.
+ */
+export function streamToken(videoId, secret, ttlMs = 30 * 60 * 1000) {
+  const exp = Date.now() + ttlMs;
+  const payload = `${videoId}.${exp}`;
+  const mac = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+  return `${Buffer.from(payload).toString("base64url")}.${mac}`;
+}
+
+export function verifyStreamToken(token, secret) {
+  if (!token || !secret) return null;
+  const parts = String(token).split(".");
+  if (parts.length !== 2) return null;
+  const [body, mac] = parts;
+  const payload = Buffer.from(body, "base64url").toString("utf8");
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+  const a = Buffer.from(mac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const separator = payload.lastIndexOf(".");
+  if (separator < 0) return null;
+  const videoId = payload.slice(0, separator);
+  const exp = Number(payload.slice(separator + 1));
+  if (!Number.isFinite(exp) || Date.now() > exp) return null;
+  return videoId;
+}
+
 // -------------------------------------------------------------------- OAuth --
 
 export function oauthConfigured(env = process.env) {
