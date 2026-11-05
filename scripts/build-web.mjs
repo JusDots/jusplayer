@@ -10,7 +10,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,36 +30,49 @@ async function exists(target) {
   }
 }
 
-/** Find a JDK 17+ (21 preferred) so the Gradle build works on any machine. */
-function findJavaHome() {
+/** Rank a JDK directory: 21+ first, then 17, then anything plausible. */
+function scoreJavaHome(dir) {
+  const name = path.basename(dir).toLowerCase();
+  if (name.includes("21")) return 30;
+  if (name.includes("17")) return 20;
+  if (name.includes("22") || name.includes("23") || name.includes("24")) return 25;
+  if (/(jdk|jre|java|temurin|corretto|zulu|graal)/.test(name)) return 10;
+  return 0;
+}
+
+/** Find a JDK 17+ so the Gradle build works on any machine. */
+async function findJavaHome() {
   const candidates = [];
   if (process.env.JAVA_HOME) candidates.push(process.env.JAVA_HOME);
 
-  const roots = ["/usr/lib/jvm", "/usr/java", "/opt/java", "/Library/Java/JavaVirtualMachines"];
-  for (const root of roots) {
+  const roots = [
+    "/usr/lib/jvm",
+    "/usr/java",
+    "/opt/java",
+    "/opt/jdk",
+    "/Library/Java/JavaVirtualMachines",
+    path.join(process.env.HOME || "", ".local/share/mise/installs/java"),
+  ];
+
+  for (const rootDir of roots) {
+    let entries = [];
     try {
-      for (const name of require("node:fs").readdirSync(root)) {
-        candidates.push(path.join(root, name));
-      }
+      entries = await readdir(rootDir);
     } catch {
-      /* directory not there — fine */
+      continue;
+    }
+    for (const entry of entries) {
+      candidates.push(path.join(rootDir, entry));
+      // macOS bundles live one level deeper: …/JavaVirtualMachines/temurin.jdk/Contents/Home
+      candidates.push(path.join(rootDir, entry, "Contents", "Home"));
     }
   }
-  candidates.push("/home/reyansh/.local/share/mise/installs/java/temurin-21.0.13+9.0.LTS");
-
-  const score = (dir) => {
-    const name = path.basename(dir);
-    if (/21/.test(name)) return 30;
-    if (/17/.test(name)) return 20;
-    if (/default|jdk|jre|java/i.test(name)) return 10;
-    return 0;
-  };
 
   let best = null;
   for (const dir of candidates) {
-    if (!dir || score(dir) === 0) continue;
+    if (!dir || scoreJavaHome(dir) === 0) continue;
     if (!(await exists(path.join(dir, "bin", "java")))) continue;
-    if (!best || score(dir) > score(best)) best = dir;
+    if (!best || scoreJavaHome(dir) > scoreJavaHome(best)) best = dir;
   }
   return best;
 }
@@ -68,7 +81,7 @@ if (!skipBuild) {
   console.log("▸ Building the Compose/Wasm client (this takes a couple of minutes)…");
   const javaHome = await findJavaHome();
   if (!javaHome) {
-    console.error("✗ No JDK 17+ found. Install one (for example Temurin 21) or set JAVA_HOME.");
+    console.error("✗ No JDK 17+ found. Install one (Temurin 21 is ideal) or set JAVA_HOME.");
     console.error("  Alternatively deploy the pre-built bundle:");
     console.error("    JUSPLAYER_PREBUILT=1 node scripts/build-web.mjs");
     process.exit(1);
