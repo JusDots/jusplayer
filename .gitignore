@@ -18,3 +18,5 @@ public/
 # Local secrets / session data
 .env.local
 *.local
+.vercel
+.env*

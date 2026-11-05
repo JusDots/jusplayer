@@ -30,18 +30,55 @@ async function exists(target) {
   }
 }
 
+/** Find a JDK 17+ (21 preferred) so the Gradle build works on any machine. */
+function findJavaHome() {
+  const candidates = [];
+  if (process.env.JAVA_HOME) candidates.push(process.env.JAVA_HOME);
+
+  const roots = ["/usr/lib/jvm", "/usr/java", "/opt/java", "/Library/Java/JavaVirtualMachines"];
+  for (const root of roots) {
+    try {
+      for (const name of require("node:fs").readdirSync(root)) {
+        candidates.push(path.join(root, name));
+      }
+    } catch {
+      /* directory not there — fine */
+    }
+  }
+  candidates.push("/home/reyansh/.local/share/mise/installs/java/temurin-21.0.13+9.0.LTS");
+
+  const score = (dir) => {
+    const name = path.basename(dir);
+    if (/21/.test(name)) return 30;
+    if (/17/.test(name)) return 20;
+    if (/default|jdk|jre|java/i.test(name)) return 10;
+    return 0;
+  };
+
+  let best = null;
+  for (const dir of candidates) {
+    if (!dir || score(dir) === 0) continue;
+    if (!(await exists(path.join(dir, "bin", "java")))) continue;
+    if (!best || score(dir) > score(best)) best = dir;
+  }
+  return best;
+}
+
 if (!skipBuild) {
   console.log("▸ Building the Compose/Wasm client (this takes a couple of minutes)…");
+  const javaHome = await findJavaHome();
+  if (!javaHome) {
+    console.error("✗ No JDK 17+ found. Install one (for example Temurin 21) or set JAVA_HOME.");
+    console.error("  Alternatively deploy the pre-built bundle:");
+    console.error("    JUSPLAYER_PREBUILT=1 node scripts/build-web.mjs");
+    process.exit(1);
+  }
+  console.log(`  using JDK: ${javaHome}`);
   const gradle = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
   const result = spawnSync(gradle, [":web:wasmJsBrowserDistribution"], {
     cwd: root,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      JAVA_HOME:
-        process.env.JAVA_HOME ||
-        "/home/reyansh/.local/share/mise/installs/java/temurin-21.0.13+9.0.LTS",
-    },
+    env: { ...process.env, JAVA_HOME: javaHome },
   });
   if (result.status !== 0) {
     console.error("✗ Gradle build failed");
