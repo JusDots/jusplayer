@@ -93,7 +93,12 @@ fun SettingsScreen(api: YtMusicApi) {
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (account.oauthAvailable) {
-                            TextButton(onClick = { openExternal(api.loginUrl()) }) {
+                            TextButton(
+                                onClick = {
+                                    openExternal(api.loginUrl())
+                                    AccountState.awaitGoogleSignIn(api, scope)
+                                },
+                            ) {
                                 Text("Sign in with Google", color = JusGreen)
                             }
                         }
@@ -103,6 +108,13 @@ fun SettingsScreen(api: YtMusicApi) {
                         TextButton(onClick = { AccountState.refresh(api, scope) }) {
                             Text("Refresh", color = JusMuted)
                         }
+                    }
+                    if (AccountState.awaitingGoogle) {
+                        Text(
+                            "Waiting for Google… finish signing in in the other tab; this page updates by itself.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JusGreen,
+                        )
                     }
                 }
             }

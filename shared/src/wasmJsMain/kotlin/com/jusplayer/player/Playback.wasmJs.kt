@@ -36,6 +36,9 @@ private external fun jsReady(): Boolean
 @JsFun("() => (window.jusPlayer ? window.jusPlayer.consumeEnded() : false)")
 private external fun jsConsumeEnded(): Boolean
 
+@JsFun("() => (window.jusPlayer ? window.jusPlayer.currentVideoId() : null)")
+private external fun jsCurrentVideoId(): String?
+
 /**
  * Actual playback on the web: audio comes from a YouTube IFrame player that is
  * driven by the glue code in index.html. We never touch raw stream URLs.
@@ -53,4 +56,5 @@ actual object Playback {
     actual fun isPlaying(): Boolean = jsIsPlaying()
     actual fun isReady(): Boolean = jsReady()
     actual fun consumeEnded(): Boolean = jsConsumeEnded()
+    actual fun currentVideoId(): String? = jsCurrentVideoId()
 }

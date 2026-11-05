@@ -70,6 +70,7 @@ import com.jusplayer.data.Stats
 import com.jusplayer.data.YtMusicApi
 import com.jusplayer.platform.artworkAccent
 import com.jusplayer.platform.platformName
+import com.jusplayer.platform.signInNotice
 import com.jusplayer.player.PlayerState
 import com.jusplayer.ui.AccentPill
 import com.jusplayer.data.AccountState
@@ -130,7 +131,7 @@ fun App() {
 
         var stack by remember { mutableStateOf(listOf<Route>(Route.Home)) }
         var query by remember { mutableStateOf("") }
-        var notice by remember { mutableStateOf<String?>(null) }
+        var notice by remember { mutableStateOf(signInNotice()) }
 
         val api = remember { YtMusicApi() }
         val snackbar = remember { SnackbarHostState() }

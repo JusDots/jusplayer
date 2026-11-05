@@ -41,5 +41,9 @@ kotlin {
             implementation(libs.ktor.client.okhttp)
             implementation(compose.desktop.currentOs)
         }
+
+        getByName("desktopTest").dependencies {
+            implementation(kotlin("test"))
+        }
     }
 }

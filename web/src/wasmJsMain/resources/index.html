@@ -88,6 +88,7 @@
             let player = null;
             let playerReady = false;
             let pendingId = null;
+            let currentId = null;
             let ended = false;
             let lastError = null;
             let volume = 0.8;
@@ -210,6 +211,7 @@
                     ended = false;
                     lastError = null;
                     playerReady = false;
+                    currentId = videoId;
                     if (!apiReady || !window.YT || !window.YT.Player) {
                         pendingId = videoId;
                         return;
@@ -281,6 +283,7 @@
                     ended = false;
                     return value;
                 },
+                currentVideoId: function () { return currentId; },
                 error: function () { return lastError; }
             };
 

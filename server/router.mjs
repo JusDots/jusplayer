@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import {
   SESSION_COOKIE,
   authHeaders,
+  bearerToken,
   clearSessionCookieHeader,
   createSession,
   exchangeCode,
@@ -31,6 +32,7 @@ import {
   oauthState,
   oauthUrl,
   parseCookies,
+  refreshAccessToken,
   sessionCookieHeader,
   streamToken,
   verifySession,
@@ -114,11 +116,13 @@ async function innertube(endpoint, body, opts = {}) {
   };
   if (cfg.visitor) headers["x-goog-visitor-id"] = cfg.visitor;
 
-  // Signed-in calls need the user's cookies plus the SAPISIDHASH signature.
+  // Signed-in calls need either the user's cookies plus the SAPISIDHASH
+  // signature, or an OAuth access token as a plain Bearer credential.
   const signed = auth ? authHeaders(auth) : null;
   if (signed) {
-    headers.cookie = signed.cookie;
+    if (signed.cookie) headers.cookie = signed.cookie;
     headers.authorization = signed.authorization;
+    if (signed.requestTime) headers["x-goog-request-time"] = signed.requestTime;
     headers["x-goog-authuser"] = "0";
   }
 
@@ -149,7 +153,9 @@ async function innertube(endpoint, body, opts = {}) {
       await bootstrap(true);
       return innertube(endpoint, body, { ...opts, retried: true });
     }
-    throw new Error(`InnerTube ${endpoint} -> HTTP ${res.status}`);
+    const error = new Error(`InnerTube ${endpoint} -> HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -511,11 +517,64 @@ function readSession(req) {
   return verifySession(cookies[SESSION_COOKIE], SECRET);
 }
 
-/** The YouTube cookie string of the signed-in user, or null. */
-function sessionCookie(req) {
-  const session = readSession(req);
-  return session?.yt ? session.yt : null;
+/**
+ * The credential InnerTube should use for a session.
+ *
+ * OAuth tokens win while they are fresh because they are the supported
+ * mobile path; the cookie (when YouTube handed one over during sign-in) is
+ * the durable fallback.
+ */
+function sessionCredential(session) {
+  if (!session) return null;
+  const oauth = session.oauth;
+  if (oauth?.accessToken) {
+    const expiresAt = Number(oauth.expiresAt) || 0;
+    if (!expiresAt || expiresAt - 60_000 > Date.now()) {
+      return `Bearer ${oauth.accessToken}`;
+    }
+  }
+  return session.yt || null;
 }
+
+function isFreshCredential(session) {
+  return Boolean(sessionCredential(session)?.startsWith("Bearer "));
+}
+
+/**
+ * Refresh an OAuth access token when it is about to expire.
+ *
+ * Runs once per request, before any handler reaches the network, and rewrites
+ * the session cookie in place so the browser keeps a valid 30-day session
+ * without ever seeing Google's short-lived tokens.
+ */
+async function prepareSession(req, res, isSecure) {
+  const session = readSession(req);
+  if (!session?.oauth?.refreshToken || isFreshCredential(session)) return session;
+  if (!oauthConfigured()) return session;
+
+  try {
+    const tokens = await refreshAccessToken({
+      refreshToken: session.oauth.refreshToken,
+      clientId: process.env.YT_CLIENT_ID,
+      clientSecret: process.env.YT_CLIENT_SECRET,
+    });
+    const next = {
+      ...session,
+      oauth: {
+        ...session.oauth,
+        accessToken: tokens.access_token,
+        expiresAt: Date.now() + (Number(tokens.expires_in) || 3600) * 1000,
+      },
+    };
+    const token = createSession(session.yt || "", next, SECRET);
+    res.setHeader("set-cookie", sessionCookieHeader(token, { secure: isSecure }));
+    return verifySession(token, SECRET) || next;
+  } catch (err) {
+    console.warn("[auth] token refresh failed:", err.message);
+    return session;
+  }
+}
+
 
 /** Best-effort account details straight from YouTube's account page. */
 async function youtubeAccountPage(cookie) {
@@ -548,19 +607,49 @@ async function youtubeAccountPage(cookie) {
 }
 
 /** Account summary for the signed-in user. */
-async function accountInfo(cookie, profile = null) {
-  if (!cookie) return { signedIn: false, name: "", email: "", avatar: "", channelId: "" };
-  if (profile?.name) {
+async function accountInfo(auth, profile = null) {
+  if (!auth && !profile?.name && !profile?.email) {
+    return { signedIn: false, name: "", email: "", avatar: "", channelId: "", source: null };
+  }
+  if (profile?.name || profile?.email) {
     return {
       signedIn: true,
-      name: profile.name,
+      name: profile.name || profile.email,
       email: profile.email || "",
       avatar: profile.avatar || "",
       channelId: profile.channelId || "",
       source: "Google",
     };
   }
-  const page = await youtubeAccountPage(cookie);
+
+  // OAuth sign-ins may not have a cookie at all; ask InnerTube directly.
+  if (bearerToken(auth)) {
+    let name = "";
+    let channelId = "";
+    try {
+      const data = await innertube("account/account_menu", {}, { auth });
+      walk(data, (node) => {
+        const header = node.accountItemRenderer || node.accountSectionListRenderer;
+        if (!header) return;
+        const title = textOf(header.title) || textOf(header.accountName);
+        if (title && !name) name = title;
+        const browseId = header.endpoint?.browseEndpoint?.browseId;
+        if (browseId?.startsWith("UC") && !channelId) channelId = browseId;
+      });
+    } catch {
+      // Best effort only.
+    }
+    return {
+      signedIn: true,
+      name: name || "YouTube Music",
+      email: "",
+      avatar: "",
+      channelId,
+      source: "Google",
+    };
+  }
+
+  const page = await youtubeAccountPage(auth);
   return {
     signedIn: true,
     name: page?.name || "YouTube Music",
@@ -1331,6 +1420,13 @@ export async function handleRequest(req, res, options = {}) {
       });
     }
 
+    // Keep OAuth credentials fresh before anything reads the session.
+    const skipRefresh =
+      url.pathname === "/api/auth/login" ||
+      url.pathname === "/api/auth/callback" ||
+      url.pathname === "/api/auth/logout";
+    const session = skipRefresh ? readSession(req) : await prepareSession(req, res, isSecure);
+
     // ------------------------------------------------------------- account ---
 
     if (url.pathname === "/api/auth/login") {
@@ -1349,6 +1445,19 @@ export async function handleRequest(req, res, options = {}) {
     }
 
     if (url.pathname === "/api/auth/callback") {
+      // Google reports consent problems (unverified app, blocked account,
+      // missing test user) as query parameters — pass them through instead of
+      // pretending the user closed the window.
+      const denied = url.searchParams.get("error");
+      if (denied) {
+        const reason = url.searchParams.get("error_description") || "";
+        console.warn(`[auth] google rejected sign-in: ${denied} ${reason}`);
+        return redirect(
+          res,
+          `/?signin=${encodeURIComponent(denied)}&reason=${encodeURIComponent(reason)}`,
+        );
+      }
+
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state");
       const cookies = parseCookies(req.headers.cookie || "");
@@ -1357,6 +1466,7 @@ export async function handleRequest(req, res, options = {}) {
         return redirect(res, "/?signin=bad_state");
       }
 
+      let stage = "token exchange";
       try {
         const tokens = await exchangeCode({
           code,
@@ -1364,21 +1474,39 @@ export async function handleRequest(req, res, options = {}) {
           clientSecret: process.env.YT_CLIENT_SECRET,
           redirectUri,
         });
-        const cookie = await youtubeCookieFromToken(tokens.access_token);
+
+        // YouTube *may* hand back its own cookies for this token. It is a
+        // nice-to-have: when it fails the Bearer token is used instead.
+        stage = "YouTube session";
+        let cookie = "";
+        try {
+          cookie = await youtubeCookieFromToken(tokens.access_token);
+        } catch (err) {
+          console.warn("[auth] no YouTube cookies, using the OAuth token:", err.message);
+        }
+
+        stage = "profile";
         const profile = await fetchUserInfo(tokens.access_token);
-        const session = createSession(
-          cookie,
-          { name: profile?.name || "", email: profile?.email || "", avatar: profile?.avatar || "" },
-          SECRET,
-        );
-        res.setHeader(
-          "set-cookie",
-          sessionCookieHeader(session, { secure: isSecure }),
-        );
+
+        const user = {
+          yt: cookie || "",
+          oauth: {
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token || "",
+            expiresAt: Date.now() + (Number(tokens.expires_in) || 3600) * 1000,
+          },
+          name: profile?.name || "",
+          email: profile?.email || "",
+          avatar: profile?.avatar || "",
+        };
+        res.setHeader("set-cookie", sessionCookieHeader(createSession(cookie, user, SECRET), { secure: isSecure }));
         return redirect(res, "/?signin=ok");
       } catch (err) {
-        console.warn("[auth] oauth callback failed:", err.message);
-        return redirect(res, "/?signin=error");
+        console.warn(`[auth] oauth ${stage} failed:`, err.message);
+        return redirect(
+          res,
+          `/?signin=error&stage=${encodeURIComponent(stage)}&reason=${encodeURIComponent(err.message)}`,
+        );
       }
     }
 
@@ -1391,12 +1519,11 @@ export async function handleRequest(req, res, options = {}) {
     }
 
     if (url.pathname === "/api/auth/session" || url.pathname === "/api/account") {
-      const session = readSession(req);
-      const cookie = session?.yt ?? null;
-      const info = await accountInfo(cookie, session?.name ? session : null);
+      const auth = sessionCredential(session);
+      const info = await accountInfo(auth, session?.name || session?.email ? session : null);
       return sendJson(res, 200, {
         ...info,
-        method: cookie ? "cookie" : null,
+        method: bearerToken(auth) ? "google" : session?.yt ? "cookie" : null,
         oauthAvailable: oauthConfigured(),
       });
     }
@@ -1408,7 +1535,7 @@ export async function handleRequest(req, res, options = {}) {
     if (url.pathname === "/api/stream") {
       const videoId = url.searchParams.get("videoId") || "";
       if (!videoId) return sendJson(res, 400, { error: "missing videoId" });
-      const auth = sessionCookie(req);
+      const auth = sessionCredential(session);
       const value = await cached(`stream:${videoId}`, 30 * 60_000, () => resolveAudio(videoId, auth));
       return sendJson(res, 200, {
         ...value,
@@ -1430,7 +1557,7 @@ export async function handleRequest(req, res, options = {}) {
       }
       const videoId = tokenVideoId || url.searchParams.get("videoId") || "";
       if (!videoId) return sendJson(res, 400, { error: "missing videoId" });
-      const auth = sessionCookie(req);
+      const auth = sessionCredential(session);
       const info = await cached(`stream:${videoId}`, 30 * 60_000, () => resolveAudio(videoId, auth));
       await proxyAudio(req, res, info, { download: url.pathname === "/api/download" });
       return;
@@ -1460,7 +1587,7 @@ export async function handleRequest(req, res, options = {}) {
 
     // ------------------------------------------------------ personalised ---
 
-    const auth = sessionCookie(req);
+    const auth = sessionCredential(session);
 
     if (url.pathname === "/api/liked") {
       if (!auth) return sendJson(res, 401, { error: "sign in to see your liked songs" });
@@ -1591,7 +1718,14 @@ export async function handleRequest(req, res, options = {}) {
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     console.error(`[${req.method} ${url.pathname}]`, err);
-    if (!res.headersSent) sendJson(res, 500, { error: err.message || "internal error" });
-    else res.end();
+    if (res.headersSent) return res.end();
+    if (err.status === 401 || err.status === 403) {
+      return sendJson(res, 401, {
+        error: "YouTube rejected this session. Sign in again to refresh it.",
+        code: "auth",
+        status: err.status,
+      });
+    }
+    sendJson(res, 500, { error: err.message || "internal error" });
   }
 }

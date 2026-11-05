@@ -309,7 +309,11 @@ object PlayerState {
         }
 
         if (Playback.consumeEnded()) {
-            next(auto = true)
+            // With a crossfade the engine may already be playing the next
+            // track — follow it instead of blindly advancing.
+            val actual = Playback.currentVideoId()
+            val target = if (actual != null) queue.indexOfFirst { it.videoId == actual } else -1
+            if (target >= 0 && target != index) playAt(target) else next(auto = true)
         }
     }
 

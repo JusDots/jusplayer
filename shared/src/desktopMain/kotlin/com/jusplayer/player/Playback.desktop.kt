@@ -1,37 +1,54 @@
 package com.jusplayer.player
 
-import com.jusplayer.platform.openExternal
+import com.jusplayer.audio.AudioProfile
+import com.jusplayer.audio.DesktopAudioEngine
 
 /**
- * Desktop playback is still WIP: we hand the track to the default browser so the
- * queue, search and library stay usable while a native engine is wired up.
+ * Desktop playback: ffmpeg decodes the track and Java Sound plays it, so the
+ * desktop build gets real pause/seek/volume control and a full DSP chain
+ * (equalizer, stereo widening, loudness normalisation, crossfade).
  */
 actual object Playback {
-    private var pendingUrl: String? = null
-    private var opened = false
+
+    private val engine = DesktopAudioEngine(
+        gatewayBase = { com.jusplayer.platform.apiBase() },
+        onError = { message -> PlayerState.error = message },
+    )
 
     actual fun load(videoId: String) {
-        pendingUrl = "https://music.youtube.com/watch?v=$videoId"
-        opened = false
+        engine.setCrossfade(AudioProfile.crossfadeSeconds.toDouble())
+        engine.setNextTrack(nextVideoId())
+        engine.load(videoId)
     }
 
-    actual fun play() {
-        val url = pendingUrl ?: return
-        if (!opened) {
-            openExternal(url)
-            opened = true
-        }
+    actual fun play() = engine.play()
+
+    actual fun pause() = engine.pause()
+
+    actual fun seek(seconds: Double) = engine.seek(seconds)
+
+    actual fun setVolume(volume: Double) = engine.setVolume(volume)
+
+    actual fun setRate(rate: Double) = engine.setRate(rate)
+
+    actual fun setMetadata(title: String, artist: String, artwork: String?) =
+        engine.setMetadata(title, artist, artwork)
+
+    actual fun position(): Double = engine.positionSeconds
+
+    actual fun duration(): Double = engine.durationSeconds
+
+    actual fun isPlaying(): Boolean = engine.playing
+
+    actual fun isReady(): Boolean = engine.ready
+
+    actual fun consumeEnded(): Boolean = engine.consumeEnded()
+
+    actual fun currentVideoId(): String? = engine.currentVideoId().ifBlank { null }
+
+    /** The track that follows the current one — used for the crossfade. */
+    private fun nextVideoId(): String? {
+        val next = PlayerState.queue.getOrNull(PlayerState.index + 1) ?: return null
+        return next.videoId
     }
-
-    actual fun pause() = Unit
-    actual fun seek(seconds: Double) = Unit
-    actual fun setVolume(volume: Double) = Unit
-    actual fun setRate(rate: Double) = Unit
-    actual fun setMetadata(title: String, artist: String, artwork: String?) = Unit
-
-    actual fun position(): Double = 0.0
-    actual fun duration(): Double = 0.0
-    actual fun isPlaying(): Boolean = false
-    actual fun isReady(): Boolean = false
-    actual fun consumeEnded(): Boolean = false
 }

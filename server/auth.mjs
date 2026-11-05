@@ -90,9 +90,32 @@ export function sapisidHash(sapisid, timestamp = Math.floor(Date.now() / 1000)) 
   return `SAPISIDHASH ${timestamp}_${hash}`;
 }
 
+/**
+ * The access token inside a `Bearer <token>` credential, or null.
+ *
+ * Sign-in can end in two different credentials:
+ *   - a YouTube cookie string, which uses the SAPISIDHASH signature, or
+ *   - an OAuth access token, which InnerTube accepts as a plain Bearer token.
+ * Keeping both in one string keeps the rest of the gateway simple.
+ */
+export function bearerToken(auth) {
+  const value = String(auth || "");
+  return value.startsWith("Bearer ") ? value.slice(7).trim() : null;
+}
+
 /** Headers that turn an InnerTube call into a signed-in call. */
-export function authHeaders(cookie) {
-  const normalised = normaliseYtCookie(cookie);
+export function authHeaders(auth) {
+  const bearer = bearerToken(auth);
+  if (bearer) {
+    if (!bearer) return null;
+    return {
+      authorization: `Bearer ${bearer}`,
+      // ytmusicapi sends this alongside OAuth calls; InnerTube expects it.
+      requestTime: String(Math.floor(Date.now() / 1000)),
+    };
+  }
+
+  const normalised = normaliseYtCookie(auth);
   if (!normalised) return null;
   const sapisid = sapisidFromCookie(normalised);
   if (!sapisid) return null;
@@ -197,12 +220,20 @@ export function oauthState() {
   return crypto.randomBytes(16).toString("base64url");
 }
 
+/**
+ * Scopes needed for the whole product:
+ *   - `youtube` keeps InnerTube signed in (liked songs, library, home feed),
+ *   - `email`/`profile` fill the account chip,
+ *   - `openid` lets the userinfo endpoint answer.
+ */
+export const OAUTH_SCOPE = "openid email profile https://www.googleapis.com/auth/youtube";
+
 export function oauthUrl({ clientId, redirectUri, state }) {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: "openid email profile https://www.googleapis.com/auth/youtube",
+    scope: OAUTH_SCOPE,
     access_type: "offline",
     prompt: "consent",
     include_granted_scopes: "true",
@@ -232,9 +263,38 @@ export async function exchangeCode({ code, clientId, clientSecret, redirectUri }
 }
 
 /**
+ * Mint a fresh access token from a stored refresh token.
+ *
+ * Access tokens last an hour; a 30-day session would be useless without
+ * this. Called lazily, only when the stored token is about to expire.
+ */
+export async function refreshAccessToken({ refreshToken, clientId, clientSecret }) {
+  const res = await fetch(GOOGLE_TOKEN, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    throw new Error(data.error_description || data.error || "OAuth token refresh failed");
+  }
+  return data;
+}
+
+/**
  * Exchange an OAuth access token for YouTube cookies: requesting
- * music.youtube.com with the bearer token makes YouTube hand back the
+ * music.youtube.com with the bearer token *can* make YouTube hand back the
  * SAPISID family of cookies in `Set-Cookie`.
+ *
+ * This is a bonus, not a requirement — OAuth access tokens work against
+ * InnerTube directly, so the caller falls back to the Bearer credential when
+ * YouTube decides not to set cookies any more.
  */
 export async function youtubeCookieFromToken(accessToken) {
   const res = await fetch("https://music.youtube.com/", {

@@ -1,10 +1,12 @@
 package com.jusplayer.data
 
+import com.jusplayer.platform.Session
 import com.jusplayer.platform.apiBase
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -99,7 +101,10 @@ class YtMusicApi(private val base: String = apiBase()) {
     /** Ends the session (the gateway clears its signed cookie). */
     suspend fun logout(): Account {
         val url = "${base.trimEnd('/')}/api/auth/logout?json=1"
-        return client.get(url).body()
+        val session = Session.headers()
+        val account: Account = client.get(url) { session.forEach { (key, value) -> header(key, value) } }.body()
+        Session.clear()
+        return account
     }
 
     /** Signs in with a pasted YouTube cookie (the fallback for OAuth). */
@@ -109,10 +114,17 @@ class YtMusicApi(private val base: String = apiBase()) {
                 contentType(ContentType.Application.Json)
                 setBody(json.encodeToString(CookieRequest.serializer(), CookieRequest(cookie)))
             }
+            // Outside a browser the app has to keep the session cookie itself.
+            Session.rememberCookies(response.headers.getAll("Set-Cookie").orEmpty())
             response.body()
         } catch (error: Throwable) {
             throw IllegalStateException(apiErrorMessage(error) ?: "Could not sign in", error)
         }
+    }
+
+    /** Ends the signed-in session. */
+    suspend fun signOut() {
+        Session.clear()
     }
 
     /** Pull the gateway's `{"error": "..."}` out of a failed request. */
@@ -134,7 +146,8 @@ class YtMusicApi(private val base: String = apiBase()) {
             append(path)
             if (qs.isNotEmpty()) append('?').append(qs)
         }
-        return client.get(url).body()
+        val session = Session.headers()
+        return client.get(url) { session.forEach { (key, value) -> header(key, value) } }.body()
     }
 
     private fun absolute(thumb: String?): String? {

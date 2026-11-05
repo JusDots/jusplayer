@@ -22,6 +22,10 @@ object AccountState {
     var loading by mutableStateOf(false)
         private set
 
+    /** True while we wait for a sign-in that is happening in another tab. */
+    var awaitingGoogle by mutableStateOf(false)
+        private set
+
     val signedIn: Boolean get() = account.signedIn
 
     /** Ask the gateway who we are. Safe to call on every app start. */
@@ -41,6 +45,31 @@ object AccountState {
         val result = runCatching { api.account() }.getOrNull()
         if (result != null) account = result
         loading = false
+    }
+
+    /**
+     * Google sign-in finishes in another tab, so this tab has to notice.
+     *
+     * Polls the gateway for a couple of minutes after the browser is sent to
+     * Google. Harmless when the user gives up: it simply stops.
+     */
+    fun awaitGoogleSignIn(api: YtMusicApi, scope: CoroutineScope? = null) {
+        val target = scope ?: CoroutineScope(Dispatchers.Default)
+        target.launch {
+            awaitingGoogle = true
+            try {
+                repeat(60) {
+                    val result = runCatching { api.account() }.getOrNull()
+                    if (result?.signedIn == true) {
+                        account = result
+                        return@launch
+                    }
+                    kotlinx.coroutines.delay(2000)
+                }
+            } finally {
+                awaitingGoogle = false
+            }
+        }
     }
 
     /** Signs in with a pasted YouTube cookie. Returns null on success. */
