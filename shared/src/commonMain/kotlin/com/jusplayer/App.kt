@@ -94,6 +94,7 @@ import com.jusplayer.ui.LibraryScreen
 import com.jusplayer.ui.LocalPlaylistScreen
 import com.jusplayer.ui.MiniPlayer
 import com.jusplayer.ui.Modals
+import com.jusplayer.ui.Notices
 import com.jusplayer.ui.MoodScreen
 import com.jusplayer.ui.QueueScreen
 import com.jusplayer.ui.Route
@@ -124,6 +125,8 @@ fun App() {
         LocalPlaylists.ensureLoaded()
         Recent.ensureLoaded()
         Stats.ensureLoaded()
+        com.jusplayer.audio.AudioProfile.ensureLoaded()
+        com.jusplayer.data.Downloads.ensureLoaded()
         SearchHistory.ensureLoaded()
         PlayerPrefs.ensureLoaded()
         PlayerState.restorePrefs()
@@ -175,6 +178,12 @@ fun App() {
             val message = notice ?: return@LaunchedEffect
             snackbar.showSnackbar(message)
             notice = null
+        }
+
+        LaunchedEffect(Notices.message) {
+            val message = Notices.message ?: return@LaunchedEffect
+            snackbar.showSnackbar(message)
+            Notices.message = null
         }
 
         LaunchedEffect(current) {

@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.jusplayer.data.AccountState
 import com.jusplayer.data.Api
+import com.jusplayer.data.Downloads
 import com.jusplayer.data.LocalPlaylists
 import com.jusplayer.data.MediaItem
 import com.jusplayer.data.YtMusicApi
@@ -201,6 +202,29 @@ fun SongMenu(item: MediaItem, onOpenArtist: ((String) -> Unit)? = null) {
                 },
             )
             if (item.videoId != null) {
+                if (Downloads.available) {
+                    val saved = Downloads.isDownloaded(item.videoId)
+                    DropdownMenuItem(
+                        text = { Text(if (saved) "Remove download" else "Download") },
+                        onClick = {
+                            menuOpen = false
+                            scope.launch {
+                                if (saved) {
+                                    Downloads.items
+                                        .firstOrNull { it.videoId == item.videoId }
+                                        ?.let { Downloads.remove(it) }
+                                    Notices.show("Removed ${item.title} from downloads")
+                                } else {
+                                    Notices.show("Downloading ${item.title}…")
+                                    val failure = Downloads.download(item)
+                                    Notices.show(
+                                        failure ?: "Downloaded ${item.title}",
+                                    )
+                                }
+                            }
+                        },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Start radio") },
                     onClick = {
@@ -245,6 +269,15 @@ fun SongMenu(item: MediaItem, onOpenArtist: ((String) -> Unit)? = null) {
  *  overlay host at the top of [com.jusplayer.App] instead of by the screen that
  *  opens it. Keeping the state global also means a sheet can be opened from a
  *  lazy-list row without being nested in that row's layout. */
+object Notices {
+    /** A one-line message for the app's snackbar; cleared once shown. */
+    var message by mutableStateOf<String?>(null)
+
+    fun show(text: String) {
+        message = text
+    }
+}
+
 object Modals {
     var addToPlaylist by mutableStateOf<MediaItem?>(null)
         private set

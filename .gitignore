@@ -20,3 +20,6 @@ public/
 *.local
 .vercel
 .env*
+
+# desktop packaging output
+dist/

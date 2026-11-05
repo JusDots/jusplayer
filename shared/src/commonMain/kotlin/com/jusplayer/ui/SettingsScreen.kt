@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,15 +31,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.jusplayer.audio.AudioProfile
 import com.jusplayer.data.AccountState
+import com.jusplayer.data.Downloads
+import com.jusplayer.data.MediaItem
 import com.jusplayer.data.LocalPlaylists
 import com.jusplayer.data.PlayerPrefs
 import com.jusplayer.data.Recent
 import com.jusplayer.data.SearchHistory
 import com.jusplayer.data.Stats
 import com.jusplayer.data.YtMusicApi
+import com.jusplayer.player.Playback
 import com.jusplayer.player.PlayerState
 import com.jusplayer.platform.openExternal
+import com.jusplayer.platform.platformName
 import kotlinx.coroutines.launch
 
 @Composable
@@ -239,6 +246,110 @@ fun SettingsScreen(api: YtMusicApi) {
             }
         }
 
+        item { SectionHeader("Audio") }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(JusSurfaceHigh)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (platformName() == "desktop") {
+                    Text(
+                        "The desktop app decodes audio itself, so the equalizer, spatial widening, loudness " +
+                            "normalisation and crossfade all run for real. Changes take effect immediately.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+
+                    AudioToggle(
+                        title = "Equalizer",
+                        subtitle = "Five bands, ±12 dB, like the mobile app.",
+                        checked = AudioProfile.equalizerEnabled,
+                        onChange = { AudioProfile.updateEqualizerEnabled(it); reapplyAudio() },
+                    )
+                    if (AudioProfile.equalizerEnabled) {
+                        AudioProfile.frequencies.forEachIndexed { index, frequency ->
+                            LabelledSlider(
+                                label = if (frequency >= 1000) "${frequency / 1000} kHz" else "$frequency Hz",
+                                value = AudioProfile.gains[index].toFloat(),
+                                range = -12f..12f,
+                                suffix = "dB",
+                                onChange = { AudioProfile.updateGain(index, it.toDouble()); reapplyAudio() },
+                            )
+                        }
+                        LabelledSlider(
+                            label = "Preamp",
+                            value = AudioProfile.preamp.toFloat(),
+                            range = -12f..12f,
+                            suffix = "dB",
+                            onChange = { AudioProfile.updatePreamp(it.toDouble()); reapplyAudio() },
+                        )
+                        TextButton(onClick = { AudioProfile.resetEqualizer(); reapplyAudio() }) {
+                            Text("Reset bands", color = JusGreen)
+                        }
+                    }
+
+                    AudioToggle(
+                        title = "Spatial audio",
+                        subtitle = "Widens the stereo image with a short haas delay.",
+                        checked = AudioProfile.spatialEnabled,
+                        onChange = { AudioProfile.updateSpatialEnabled(it); reapplyAudio() },
+                    )
+                    if (AudioProfile.spatialEnabled) {
+                        LabelledSlider(
+                            label = "Width",
+                            value = AudioProfile.spatialWidth.toFloat() * 100f,
+                            range = 0f..100f,
+                            suffix = "%",
+                            onChange = { AudioProfile.updateSpatialWidth(it / 100.0); reapplyAudio() },
+                        )
+                    }
+
+                    AudioToggle(
+                        title = "Loudness normalisation",
+                        subtitle = "EBU R128, so quiet masters and loud ones sit at the same level.",
+                        checked = AudioProfile.loudnessEnabled,
+                        onChange = { AudioProfile.updateLoudnessEnabled(it); reapplyAudio() },
+                    )
+
+                    Text("Crossfade", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(0, 3, 6, 9, 12).forEach { seconds ->
+                            FilterChip(
+                                selected = AudioProfile.crossfadeSeconds == seconds,
+                                onClick = { AudioProfile.updateCrossfade(seconds) },
+                                label = {
+                                    Text(
+                                        if (seconds == 0) "Off" else "${seconds}s",
+                                        style = MaterialTheme.typography.labelMedium,
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = JusGreen,
+                                    selectedLabelColor = JusInk,
+                                    containerColor = JusSurface,
+                                    labelColor = JusMuted,
+                                ),
+                                border = null,
+                                shape = RoundedCornerShape(50),
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        "The browser plays through YouTube's own player, which cannot be routed through the " +
+                            "Web Audio API. Downloaded tracks and local files are decoded by the app instead, and " +
+                            "those do get the equalizer, spatial widening and loudness normalisation.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                }
+            }
+        }
+
         item { SectionHeader("Keyboard shortcuts") }
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -285,6 +396,104 @@ fun SettingsScreen(api: YtMusicApi) {
                     action = "Clear",
                     onAction = { Stats.clear() },
                 )
+            }
+        }
+
+        item { SectionHeader("Offline") }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(JusSurfaceHigh)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (!Downloads.available) {
+                    Text("Not available in this build", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Text(
+                        "The desktop app stores tracks on disk and plays them without a connection. " +
+                            "The browser edition still streams through YouTube's player.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                } else {
+                    Text(
+                        "${Downloads.items.size} track${if (Downloads.items.size == 1) "" else "s"} · " +
+                            formatBytes(Downloads.items.sumOf { it.bytes }),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = JusText,
+                    )
+                    Text(
+                        "Saved in the app's data folder. Downloaded tracks play offline and keep the audio " +
+                            "settings above.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                    val currentTrack = PlayerState.current
+                    if (currentTrack?.videoId != null && !Downloads.isDownloaded(currentTrack.videoId)) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    Notices.show("Downloading ${currentTrack.title}…")
+                                    val failure = Downloads.download(currentTrack)
+                                    Notices.show(failure ?: "Downloaded ${currentTrack.title}")
+                                }
+                            },
+                        ) {
+                            Text("Download “${currentTrack.title}”", color = JusGreen)
+                        }
+                    }
+                    if (Downloads.items.isEmpty()) {
+                        Text(
+                            "No downloads yet. Use the ⋮ menu on any song, or the button above.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JusMuted,
+                        )
+                    } else {
+                        Downloads.items.forEach { track ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        track.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = JusText,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        listOfNotNull(
+                                            track.artist.takeIf { it.isNotBlank() },
+                                            formatBytes(track.bytes),
+                                        ).joinToString(" · "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = JusMuted,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        PlayerState.playQueue(
+                                            listOf(
+                                                MediaItem(
+                                                    id = "v:${track.videoId}",
+                                                    title = track.title,
+                                                    subtitle = track.artist,
+                                                    thumbnail = track.thumbnail,
+                                                    kind = "song",
+                                                    videoId = track.videoId,
+                                                ),
+                                            ),
+                                            0,
+                                        )
+                                    },
+                                ) { Text("Play", color = JusGreen) }
+                                TextButton(onClick = { Downloads.remove(track) }) {
+                                    Text("Delete", color = JusMuted)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -343,6 +552,61 @@ fun SettingsScreen(api: YtMusicApi) {
 }
 
 @Composable
+private fun AudioToggle(    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = JusText)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = JusMuted)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun LabelledSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    suffix: String,
+    onChange: (Float) -> Unit,
+) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodySmall, color = JusText, modifier = Modifier.width(72.dp))
+            Slider(
+                value = value,
+                onValueChange = onChange,
+                valueRange = range,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${value.toInt()}$suffix",
+                style = MaterialTheme.typography.labelSmall,
+                color = JusMuted,
+                modifier = Modifier.width(48.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Restart the current track so the engine rebuilds its ffmpeg filter chain.
+ *
+ * Seeking is how the desktop engine re-opens the stream, and it keeps the
+ * position, so the only cost is a few milliseconds of silence.
+ */
+private fun reapplyAudio() {
+    if (platformName() != "desktop") return
+    val at = Playback.position()
+    if (Playback.isReady()) Playback.seek(at)
+}
+
+@Composable
 private fun ShortcutRow(keys: String, action: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
@@ -372,4 +636,19 @@ private fun DataRow(title: String, value: String, action: String, onAction: () -
         Spacer(Modifier.width(8.dp))
         TextButton(onClick = onAction) { Text(action, color = JusGreen) }
     }
+}
+
+/** Small, platform-neutral byte formatting (no String.format in common code). */
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return "${round1(kb)} KB"
+    val mb = kb / 1024.0
+    if (mb < 1024) return "${round1(mb)} MB"
+    return "${round1(mb / 1024.0)} GB"
+}
+
+private fun round1(value: Double): String {
+    val scaled = (value * 10).toInt()
+    return "${scaled / 10}.${scaled % 10}"
 }

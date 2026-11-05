@@ -32,7 +32,7 @@ data class StreamInfo(
 
 /** A place we can pull audio from. */
 private class Candidate(val kind: Kind, val url: String, val userAgent: String = "") {
-    enum class Kind { Direct, Proxy, YtDlp }
+    enum class Kind { Direct, Proxy, YtDlp, File }
 }
 
 /** Blocking HTTP helpers — the engine runs on its own threads. */
@@ -163,6 +163,21 @@ class DesktopAudioEngine(
 
     private fun prepare(videoId: String, myGeneration: Int) {
         try {
+            // A downloaded track never touches the network.
+            val local = com.jusplayer.data.Downloads.localFile(videoId)
+            if (local != null) {
+                title = com.jusplayer.data.Downloads.items
+                    .firstOrNull { it.videoId == videoId }?.title.orEmpty()
+                artist = com.jusplayer.data.Downloads.items
+                    .firstOrNull { it.videoId == videoId }?.artist.orEmpty()
+                expectedDuration = 0.0
+                durationSeconds = 0.0
+                candidates = listOf(Candidate(Candidate.Kind.File, local))
+                val started = startSource(videoId, candidates.first(), 0.0, myGeneration) ?: return
+                ready = true
+                return
+            }
+
             val base = gatewayBase()
             val info = json.decodeFromString<StreamInfo>(
                 GatewayHttp.get(base, "/api/stream?videoId=$videoId"),
