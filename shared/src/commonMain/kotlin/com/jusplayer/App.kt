@@ -127,6 +127,7 @@ fun App() {
         Stats.ensureLoaded()
         com.jusplayer.audio.AudioProfile.ensureLoaded()
         com.jusplayer.data.Downloads.ensureLoaded()
+        com.jusplayer.platform.LocalFiles.ensureLoaded()
         SearchHistory.ensureLoaded()
         PlayerPrefs.ensureLoaded()
         PlayerState.restorePrefs()

@@ -7,6 +7,9 @@ import com.jusplayer.data.MediaItem
 import com.jusplayer.data.PlayerPrefs
 import com.jusplayer.data.Recent
 import com.jusplayer.data.Stats
+import com.jusplayer.platform.DiscordPresence
+import com.jusplayer.platform.Scrobbler
+import com.jusplayer.platform.epochSeconds
 import kotlin.random.Random
 
 enum class RepeatMode { Off, All, One }
@@ -52,6 +55,13 @@ object PlayerState {
 
     /** Remaining sleep-timer seconds, or null when no timer is running. */
     private var sleepSeconds by mutableStateOf<Double?>(null)
+
+    // Scrobbling state: the track we announced, when it started and how far it
+    // got, so a skip does not count as a play.
+    private var startedItem: MediaItem? = null
+    private var startedAtSeconds: Long = 0
+    private var playedSeconds: Double = 0.0
+    private var lastPresenceAt: Long = 0
     val sleepRemaining: Int? get() = sleepSeconds?.toInt()
 
     var sleepAfterTrack by mutableStateOf(false)
@@ -308,7 +318,11 @@ object PlayerState {
             }
         }
 
+        playedSeconds = maxOf(playedSeconds, position)
+        publishPresence(force = false)
+
         if (Playback.consumeEnded()) {
+            finishTrack(completed = true)
             // With a crossfade the engine may already be playing the next
             // track — follow it instead of blindly advancing.
             val actual = Playback.currentVideoId()
@@ -317,9 +331,60 @@ object PlayerState {
         }
     }
 
+    /**
+     * Announce a new track to Discord and ListenBrainz, and close the previous
+     * one if it was actually listened to (half the track or 30 seconds).
+     */
+    private fun finishTrack(completed: Boolean) {
+        val item = startedItem ?: return
+        val length = item.durationSeconds.toDouble()
+        val listened = if (completed && length > 0) length else playedSeconds
+        val threshold = if (length > 0) minOf(length * 0.5, 240.0) else 30.0
+        if (listened >= maxOf(30.0, threshold)) {
+            Scrobbler.scrobble(
+                title = item.title,
+                artist = item.primaryArtist,
+                album = item.subtitle,
+                durationSeconds = item.durationSeconds,
+                startedAtSeconds = startedAtSeconds,
+            )
+        }
+        startedItem = null
+        playedSeconds = 0.0
+    }
+
+    private fun beginTrack(item: MediaItem) {
+        startedItem = item
+        startedAtSeconds = epochSeconds()
+        playedSeconds = 0.0
+        Scrobbler.nowPlaying(
+            title = item.title,
+            artist = item.primaryArtist,
+            album = item.subtitle,
+            durationSeconds = item.durationSeconds,
+        )
+        publishPresence(force = true)
+    }
+
+    private fun publishPresence(force: Boolean) {
+        val item = current ?: return
+        val now = epochSeconds()
+        if (!force && now - lastPresenceAt < 5) return
+        lastPresenceAt = now
+        DiscordPresence.update(
+            title = item.title,
+            artist = item.primaryArtist,
+            artwork = item.thumbnail,
+            playing = playing,
+            positionSeconds = position,
+            durationSeconds = duration,
+        )
+    }
+
     private fun load() {
         val item = current ?: return
         val id = item.videoId ?: return
+        finishTrack(completed = false)
         playing = true
         buffering = true
         position = 0.0
@@ -335,6 +400,7 @@ object PlayerState {
             artist = item.artists.firstOrNull()?.name ?: item.subtitle,
             artwork = item.thumbnail,
         )
+        beginTrack(item)
     }
 }
 

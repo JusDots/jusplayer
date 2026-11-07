@@ -12,6 +12,8 @@ private const val SESSION_KEY = "jusplayer.session"
 
 private var cachedBase: String? = null
 
+actual fun epochSeconds(): Long = System.currentTimeMillis() / 1000
+
 actual fun apiBase(): String {
     cachedBase?.let { return it }
     val configured = System.getProperty("jusplayer.api")

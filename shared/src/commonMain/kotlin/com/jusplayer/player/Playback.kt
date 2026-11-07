@@ -33,4 +33,13 @@ expect object Playback {
      * stay in sync.
      */
     fun currentVideoId(): String?
+
+    /**
+     * Push the shared audio settings into the platform engine.
+     *
+     * The desktop engine reads [com.jusplayer.audio.AudioProfile] whenever it
+     * opens a stream, so there it is a no-op. The web build needs an explicit
+     * push because its Web Audio graph is owned by the JavaScript bridge.
+     */
+    fun uploadAudioProfile()
 }

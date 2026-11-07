@@ -78,10 +78,315 @@
 
     <script>
         /**
+         * Offline downloads for the browser build.
+         *
+         * Audio bytes live in IndexedDB and the metadata in localStorage, so a
+         * downloaded track survives a reload and plays without the network.
+         * Kotlin cannot await a JS Promise directly, so downloads run here and
+         * the app polls `status()`.
+         */
+        (function () {
+            const META_KEY = "jusplayer.downloads.v1";
+            const DB_NAME = "jusplayer";
+            const STORE = "tracks";
+            const statuses = new Map();
+            let meta = null;
+
+            function loadMeta() {
+                if (meta) return meta;
+                try {
+                    const raw = window.localStorage.getItem(META_KEY);
+                    meta = raw ? JSON.parse(raw) : [];
+                    if (!Array.isArray(meta)) meta = [];
+                } catch (e) {
+                    meta = [];
+                }
+                return meta;
+            }
+
+            function saveMeta() {
+                try {
+                    window.localStorage.setItem(META_KEY, JSON.stringify(loadMeta()));
+                } catch (e) { /* storage may be full or blocked */ }
+            }
+
+            function openDb() {
+                return new Promise(function (resolve, reject) {
+                    const request = window.indexedDB.open(DB_NAME, 1);
+                    request.onupgradeneeded = function () {
+                        if (!request.result.objectStoreNames.contains(STORE)) {
+                            request.result.createObjectStore(STORE);
+                        }
+                    };
+                    request.onsuccess = function () { resolve(request.result); };
+                    request.onerror = function () { reject(request.error); };
+                });
+            }
+
+            async function putBlob(videoId, blob) {
+                const db = await openDb();
+                return new Promise(function (resolve, reject) {
+                    const tx = db.transaction(STORE, "readwrite");
+                    tx.objectStore(STORE).put(blob, videoId);
+                    tx.oncomplete = function () { db.close(); resolve(); };
+                    tx.onerror = function () { db.close(); reject(tx.error); };
+                });
+            }
+
+            async function getBlob(videoId) {
+                const db = await openDb();
+                return new Promise(function (resolve, reject) {
+                    const tx = db.transaction(STORE, "readonly");
+                    const request = tx.objectStore(STORE).get(videoId);
+                    request.onsuccess = function () { db.close(); resolve(request.result || null); };
+                    request.onerror = function () { db.close(); reject(request.error); };
+                });
+            }
+
+            async function deleteBlob(videoId) {
+                const db = await openDb();
+                return new Promise(function (resolve) {
+                    const tx = db.transaction(STORE, "readwrite");
+                    tx.objectStore(STORE).delete(videoId);
+                    tx.oncomplete = function () { db.close(); resolve(); };
+                    tx.onerror = function () { db.close(); resolve(); };
+                });
+            }
+
+            function entry(videoId) {
+                return loadMeta().find(function (track) { return track.videoId === videoId; }) || null;
+            }
+
+            window.jusOffline = {
+                /** All saved tracks, newest first, as JSON. */
+                list: function () {
+                    return JSON.stringify(loadMeta().slice().sort(function (a, b) {
+                        return (b.addedAt || 0) - (a.addedAt || 0);
+                    }));
+                },
+                has: function (videoId) {
+                    return !!entry(videoId);
+                },
+                status: function (videoId) {
+                    const value = statuses.get(videoId);
+                    return JSON.stringify(value || { state: "idle" });
+                },
+                start: function (videoId, metaJson, url) {
+                    if (statuses.get(videoId) && statuses.get(videoId).state === "progress") return;
+                    const info = metaJson ? JSON.parse(metaJson) : {};
+                    statuses.set(videoId, { state: "progress", bytes: 0 });
+                    fetch(url, { credentials: "include" })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error("HTTP " + response.status);
+                            return response.blob();
+                        })
+                        .then(function (blob) {
+                            if (blob.size < 64000) {
+                                throw new Error("YouTube only served a short preview of this track.");
+                            }
+                            return putBlob(videoId, blob).then(function () {
+                                const tracks = loadMeta().filter(function (t) { return t.videoId !== videoId; });
+                                tracks.push({
+                                    videoId: videoId,
+                                    title: info.title || videoId,
+                                    artist: info.artist || "",
+                                    album: info.album || "",
+                                    thumbnail: info.thumbnail || null,
+                                    bytes: blob.size,
+                                    file: videoId,
+                                    addedAt: Date.now(),
+                                });
+                                meta = tracks;
+                                saveMeta();
+                                statuses.set(videoId, { state: "done", bytes: blob.size });
+                            });
+                        })
+                        .catch(function (error) {
+                            statuses.set(videoId, { state: "error", error: String(error && error.message || error) });
+                        });
+                },
+                remove: function (videoId) {
+                    meta = loadMeta().filter(function (t) { return t.videoId !== videoId; });
+                    saveMeta();
+                    statuses.delete(videoId);
+                    return deleteBlob(videoId);
+                },
+                /**
+                 * Hand the saved blob to the player. Resolves once playback has
+                 * started, rejects when the blob is gone.
+                 */
+                blobUrl: function (videoId) {
+                    return getBlob(videoId).then(function (blob) {
+                        if (!blob) throw new Error("This track is no longer stored.");
+                        return URL.createObjectURL(blob);
+                    });
+                }
+            };
+        })();
+    </script>
+
+    <script>
+        /**
+         * Local audio files in the browser.
+         *
+         * A downloaded track and an imported file are the same thing to the
+         * player: a Blob in IndexedDB that is handed to an <audio> element.
+         * The picker cannot return synchronously, so `pick()` starts it and
+         * the app polls `picking()` / `imported()`.
+         */
+        (function () {
+            const META_KEY = "jusplayer.localfiles.v1";
+            const DB_NAME = "jusplayer-localfiles";
+            const STORE = "files";
+            let meta = null;
+            let picking = false;
+            let imported = 0;
+
+            function loadMeta() {
+                if (meta) return meta;
+                try {
+                    const raw = window.localStorage.getItem(META_KEY);
+                    meta = raw ? JSON.parse(raw) : [];
+                    if (!Array.isArray(meta)) meta = [];
+                } catch (e) {
+                    meta = [];
+                }
+                return meta;
+            }
+
+            function saveMeta() {
+                try {
+                    window.localStorage.setItem(META_KEY, JSON.stringify(loadMeta()));
+                } catch (e) { /* ignore quota errors */ }
+            }
+
+            function openDb() {
+                return new Promise(function (resolve, reject) {
+                    const request = window.indexedDB.open(DB_NAME, 1);
+                    request.onupgradeneeded = function () {
+                        if (!request.result.objectStoreNames.contains(STORE)) {
+                            request.result.createObjectStore(STORE);
+                        }
+                    };
+                    request.onsuccess = function () { resolve(request.result); };
+                    request.onerror = function () { reject(request.error); };
+                });
+            }
+
+            function putBlob(id, blob) {
+                return openDb().then(function (db) {
+                    return new Promise(function (resolve, reject) {
+                        const tx = db.transaction(STORE, "readwrite");
+                        tx.objectStore(STORE).put(blob, id);
+                        tx.oncomplete = function () { db.close(); resolve(); };
+                        tx.onerror = function () { db.close(); reject(tx.error); };
+                    });
+                });
+            }
+
+            function getBlob(id) {
+                return openDb().then(function (db) {
+                    return new Promise(function (resolve, reject) {
+                        const tx = db.transaction(STORE, "readonly");
+                        const request = tx.objectStore(STORE).get(id);
+                        request.onsuccess = function () { db.close(); resolve(request.result || null); };
+                        request.onerror = function () { db.close(); reject(request.error); };
+                    });
+                });
+            }
+
+            function hash(value) {
+                let h = 2166136261;
+                for (let i = 0; i < value.length; i++) {
+                    h ^= value.charCodeAt(i);
+                    h = Math.imul(h, 16777619);
+                }
+                return (h >>> 0).toString(16);
+            }
+
+            window.jusLocalFiles = {
+                list: function () {
+                    return JSON.stringify(loadMeta().slice().sort(function (a, b) {
+                        return (b.addedAt || 0) - (a.addedAt || 0);
+                    }));
+                },
+                has: function (id) {
+                    return loadMeta().some(function (track) { return track.videoId === id; });
+                },
+                picking: function () { return picking; },
+                imported: function () { return imported; },
+                pick: function () {
+                    if (picking) return;
+                    picking = true;
+                    imported = 0;
+                    const input = document.createElement("input");
+                    input.type = "file";
+                    input.multiple = true;
+                    input.accept = "audio/*,.m4a,.mp3,.flac,.ogg,.opus,.wav";
+                    input.style.display = "none";
+                    document.body.appendChild(input);
+                    input.onchange = function () {
+                        const files = Array.from(input.files || []);
+                        Promise.all(files.map(function (file) {
+                            const id = "file:" + hash(file.name + file.size + file.lastModified) + "-" + file.size.toString(16);
+                            return putBlob(id, file).then(function () {
+                                const tracks = loadMeta().filter(function (t) { return t.videoId !== id; });
+                                tracks.push({
+                                    videoId: id,
+                                    title: file.name.replace(/\.[^.]+$/, "").replace(/_/g, " "),
+                                    artist: "Local file",
+                                    album: "",
+                                    thumbnail: null,
+                                    bytes: file.size,
+                                    file: id,
+                                    addedAt: Date.now(),
+                                });
+                                meta = tracks;
+                                imported++;
+                            });
+                        })).then(function () {
+                            saveMeta();
+                            picking = false;
+                            input.remove();
+                        }).catch(function () {
+                            picking = false;
+                            input.remove();
+                        });
+                    };
+                    input.oncancel = function () {
+                        picking = false;
+                        input.remove();
+                    };
+                    input.click();
+                },
+                remove: function (id) {
+                    meta = loadMeta().filter(function (t) { return t.videoId !== id; });
+                    saveMeta();
+                    return openDb().then(function (db) {
+                        const tx = db.transaction(STORE, "readwrite");
+                        tx.objectStore(STORE).delete(id);
+                        tx.oncomplete = function () { db.close(); };
+                    }).catch(function () {});
+                },
+                blobUrl: function (id) {
+                    return getBlob(id).then(function (blob) {
+                        if (!blob) throw new Error("This file is no longer stored.");
+                        return URL.createObjectURL(blob);
+                    });
+                }
+            };
+        })();
+    </script>
+
+    <script>
+        /**
          * JusPlayer audio bridge.
          *
-         * Playback is delegated to YouTube's official IFrame Player API — no stream
-         * URLs are extracted or proxied. Kotlin/Wasm polls this small surface.
+         * Streamed tracks use YouTube's official IFrame Player API — no stream
+         * URLs are extracted or proxied. Downloaded tracks play through an
+         * HTMLAudioElement routed into Web Audio, which is what makes the
+         * equalizer, stereo widening and loudness normalisation real in the
+         * browser. Kotlin/Wasm polls this small surface.
          */
         (function () {
             let apiReady = false;
@@ -93,6 +398,173 @@
             let lastError = null;
             let volume = 0.8;
             let rate = 1;
+
+            // ---------------------------------------------------------- local --
+            // Downloaded tracks do not go through YouTube at all: an <audio>
+            // element feeds a Web Audio graph so the DSP settings are audible.
+            let mode = "yt";
+            let localAudio = null;
+            let localUrl = null;
+            let audioCtx = null;
+            let audioNodes = null;
+            let localReady = false;
+            let audioProfile = {
+                equalizer: false,
+                gains: [0, 0, 0, 0, 0],
+                preamp: 0,
+                spatial: false,
+                width: 0.4,
+                loudness: false
+            };
+            const bands = [60, 230, 910, 3600, 14000];
+
+            function ensureContext() {
+                if (audioCtx) return audioCtx;
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (!Ctx) return null;
+                audioCtx = new Ctx();
+                return audioCtx;
+            }
+
+            /**
+             * (Re)build the chain: source -> preamp -> 5 peaking filters ->
+             * [haas widener] -> [compressor] -> master volume -> speakers.
+             */
+            function buildChain() {
+                if (!audioCtx || !localAudio || !audioNodes) return;
+                const ctx = audioCtx;
+                const nodes = audioNodes;
+                try { nodes.source.disconnect(); } catch (e) {}
+                nodes.filters.forEach(function (filter) { try { filter.disconnect(); } catch (e) {} });
+                try { nodes.preamp.disconnect(); } catch (e) {}
+                try { nodes.splitter.disconnect(); } catch (e) {}
+                try { nodes.delay.disconnect(); } catch (e) {}
+                try { nodes.merger.disconnect(); } catch (e) {}
+                try { nodes.compressor.disconnect(); } catch (e) {}
+                try { nodes.master.disconnect(); } catch (e) {}
+
+                let tail = nodes.preamp;
+                nodes.source.connect(nodes.preamp);
+                nodes.filters.forEach(function (filter) {
+                    tail.connect(filter);
+                    tail = filter;
+                });
+
+                if (audioProfile.spatial) {
+                    tail.connect(nodes.splitter);
+                    nodes.splitter.connect(nodes.merger, 0, 0);
+                    nodes.splitter.connect(nodes.delay, 1, 0);
+                    nodes.delay.connect(nodes.merger, 0, 1);
+                    tail = nodes.merger;
+                }
+
+                if (audioProfile.loudness) {
+                    tail.connect(nodes.compressor);
+                    tail = nodes.compressor;
+                }
+
+                tail.connect(nodes.master);
+                nodes.master.connect(ctx.destination);
+            }
+
+            function applyProfile() {
+                if (!audioNodes) return;
+                audioNodes.preamp.gain.value = Math.pow(10, audioProfile.preamp / 20);
+                audioNodes.filters.forEach(function (filter, index) {
+                    const on = audioProfile.equalizer ? 1 : 0;
+                    filter.gain.value = on * (audioProfile.gains[index] || 0);
+                });
+                // A delayed copy of the right channel widens the image.
+                audioNodes.delay.delayTime.value = 0.004 + audioProfile.width * 0.018;
+                audioNodes.master.gain.value = volume;
+                buildChain();
+            }
+
+            function prepareLocal(videoId, url) {
+                const ctx = ensureContext();
+                if (!ctx) {
+                    lastError = "Web Audio is not available in this browser.";
+                    return;
+                }
+                if (localAudio) {
+                    try { localAudio.pause(); } catch (e) {}
+                    localAudio.src = "";
+                }
+                if (localUrl) {
+                    try { URL.revokeObjectURL(localUrl); } catch (e) {}
+                    localUrl = null;
+                }
+                localReady = false;
+                ended = false;
+                localUrl = url;
+
+                localAudio = new Audio();
+                localAudio.preload = "auto";
+                localAudio.src = url;
+                localAudio.crossOrigin = "anonymous";
+                localAudio.playbackRate = rate;
+
+                if (!audioNodes) {
+                    const source = ctx.createMediaElementSource(localAudio);
+                    const preamp = ctx.createGain();
+                    const filters = bands.map(function (frequency) {
+                        const filter = ctx.createBiquadFilter();
+                        filter.type = "peaking";
+                        filter.frequency.value = frequency;
+                        filter.Q.value = 1.1;
+                        filter.gain.value = 0;
+                        return filter;
+                    });
+                    const splitter = ctx.createChannelSplitter(2);
+                    const delay = ctx.createDelay(0.1);
+                    const merger = ctx.createChannelMerger(2);
+                    const compressor = ctx.createDynamicsCompressor();
+                    compressor.threshold.value = -18;
+                    compressor.knee.value = 12;
+                    compressor.ratio.value = 3;
+                    compressor.attack.value = 0.01;
+                    compressor.release.value = 0.25;
+                    const master = ctx.createGain();
+                    audioNodes = { source: source, preamp: preamp, filters: filters, splitter: splitter, delay: delay, merger: merger, compressor: compressor, master: master };
+                    applyProfile();
+                } else {
+                    // A fresh element needs a fresh source node.
+                    try { audioNodes.source.disconnect(); } catch (e) {}
+                    audioNodes.source = ctx.createMediaElementSource(localAudio);
+                    applyProfile();
+                }
+
+                localAudio.onended = function () { ended = true; };
+                localAudio.oncanplay = function () {
+                    localReady = true;
+                    if (localAudio.paused) {
+                        localAudio.play().then(function () {
+                            if (ctx.state === "suspended") ctx.resume();
+                        }).catch(function (error) {
+                            lastError = "Could not play the downloaded track: " + error.message;
+                        });
+                    }
+                };
+                localAudio.onerror = function () {
+                    lastError = "The downloaded file could not be decoded.";
+                    ended = true;
+                };
+
+                mode = "local";
+                currentId = videoId;
+                playerReady = false;
+                if (ctx.state === "suspended") ctx.resume();
+            }
+
+            function localPlay() {
+                if (!localAudio) return;
+                if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+                localAudio.play().catch(function () {});
+            }
+
+            function localPause() {
+                if (localAudio) localAudio.pause();
+            }
 
             const host = document.createElement("div");
             host.id = "yt-audio-host";
@@ -210,6 +682,34 @@
                 load: function (videoId) {
                     ended = false;
                     lastError = null;
+
+                    // A downloaded track is played from IndexedDB, with DSP.
+                    const savedDownload = window.jusOffline && window.jusOffline.has(videoId);
+                    const savedFile = window.jusLocalFiles && window.jusLocalFiles.has(videoId);
+                    if (savedDownload || savedFile) {
+                        mode = "local";
+                        currentId = videoId;
+                        localReady = false;
+                        if (player && player.pauseVideo) player.pauseVideo();
+                        const source = savedDownload ? window.jusOffline : window.jusLocalFiles;
+                        source.blobUrl(videoId).then(function (url) {
+                            if (currentId !== videoId) {
+                                URL.revokeObjectURL(url);
+                                return;
+                            }
+                            prepareLocal(videoId, url);
+                        }).catch(function (error) {
+                            lastError = String(error && error.message || error);
+                            ended = true;
+                        });
+                        return;
+                    }
+
+                    // Otherwise fall back to YouTube's player.
+                    mode = "yt";
+                    if (localAudio) {
+                        try { localAudio.pause(); } catch (e) {}
+                    }
                     playerReady = false;
                     currentId = videoId;
                     if (!apiReady || !window.YT || !window.YT.Player) {
@@ -224,21 +724,46 @@
                     }
                 },
                 play: function () {
+                    if (mode === "local") return localPlay();
                     if (player && player.playVideo) player.playVideo();
                 },
                 pause: function () {
+                    if (mode === "local") return localPause();
                     if (player && player.pauseVideo) player.pauseVideo();
                 },
                 seek: function (seconds) {
+                    if (mode === "local") {
+                        if (localAudio) localAudio.currentTime = Math.max(0, seconds);
+                        return;
+                    }
                     if (player && player.seekTo) player.seekTo(Math.max(0, seconds), true);
                 },
                 setVolume: function (value) {
                     volume = Math.max(0, Math.min(1, value));
+                    if (mode === "local" && audioNodes) {
+                        audioNodes.master.gain.value = volume;
+                    }
                     if (player && player.setVolume) player.setVolume(volume * 100);
                 },
                 setRate: function (value) {
                     rate = Math.max(0.25, Math.min(2, value));
+                    if (mode === "local" && localAudio) localAudio.playbackRate = rate;
                     if (player && player.setPlaybackRate) player.setPlaybackRate(rate);
+                },
+                /** Push the shared AudioProfile into the Web Audio chain. */
+                applyAudio: function (json) {
+                    try {
+                        const next = JSON.parse(json);
+                        audioProfile = {
+                            equalizer: !!next.equalizer,
+                            gains: Array.isArray(next.gains) ? next.gains : [0, 0, 0, 0, 0],
+                            preamp: Number(next.preamp) || 0,
+                            spatial: !!next.spatial,
+                            width: Number(next.width) || 0,
+                            loudness: !!next.loudness
+                        };
+                        applyProfile();
+                    } catch (e) { /* ignore malformed profiles */ }
                 },
                 setMetadata: function (title, artist, artwork) {
                     extractArtworkColor(artwork ? new URL(artwork, window.location.href).href : null);
@@ -251,31 +776,39 @@
                             artwork: artwork ? [{ src: new URL(artwork, window.location.href).href, sizes: "512x512" }] : []
                         });
                         navigator.mediaSession.setActionHandler("play", function () {
-                            if (player && player.playVideo) player.playVideo();
+                            if (mode === "local") localPlay();
+                            else if (player && player.playVideo) player.playVideo();
                         });
                         navigator.mediaSession.setActionHandler("pause", function () {
-                            if (player && player.pauseVideo) player.pauseVideo();
+                            if (mode === "local") localPause();
+                            else if (player && player.pauseVideo) player.pauseVideo();
                         });
                         navigator.mediaSession.setActionHandler("seekto", function (details) {
-                            if (player && player.seekTo && typeof details.seekTime === "number") {
-                                player.seekTo(details.seekTime, true);
-                            }
+                            if (typeof details.seekTime !== "number") return;
+                            if (mode === "local" && localAudio) localAudio.currentTime = details.seekTime;
+                            else if (player && player.seekTo) player.seekTo(details.seekTime, true);
                         });
                     } catch (e) { /* media session is best effort */ }
                 },
                 position: function () {
+                    if (mode === "local") return localAudio ? localAudio.currentTime || 0 : 0;
                     try { return player && player.getCurrentTime ? player.getCurrentTime() : 0; }
                     catch (e) { return 0; }
                 },
                 duration: function () {
+                    if (mode === "local") {
+                        return localAudio && isFinite(localAudio.duration) ? localAudio.duration : 0;
+                    }
                     try { return player && player.getDuration ? player.getDuration() : 0; }
                     catch (e) { return 0; }
                 },
                 isPlaying: function () {
+                    if (mode === "local") return !!(localAudio && !localAudio.paused && !localAudio.ended);
                     try { return !!(player && player.getPlayerState && player.getPlayerState() === 1); }
                     catch (e) { return false; }
                 },
                 ready: function () {
+                    if (mode === "local") return localReady;
                     return !!(apiReady && player && playerReady);
                 },
                 consumeEnded: function () {
@@ -284,7 +817,20 @@
                     return value;
                 },
                 currentVideoId: function () { return currentId; },
-                error: function () { return lastError; }
+                error: function () { return lastError; },
+                /** Diagnostics: what the audio pipeline is actually doing. */
+                debug: function () {
+                    return {
+                        mode: mode,
+                        context: audioCtx ? audioCtx.state : null,
+                        time: localAudio ? localAudio.currentTime : null,
+                        paused: localAudio ? localAudio.paused : null,
+                        readyState: localAudio ? localAudio.readyState : null,
+                        networkState: localAudio ? localAudio.networkState : null,
+                        rate: localAudio ? localAudio.playbackRate : null,
+                        error: lastError
+                    };
+                }
             };
 
             mountHost();

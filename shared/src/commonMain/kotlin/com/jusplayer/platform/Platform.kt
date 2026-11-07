@@ -3,6 +3,9 @@ package com.jusplayer.platform
 /** Base URL of the JusPlayer gateway, e.g. `http://localhost:8787`. */
 expect fun apiBase(): String
 
+/** Unix time in seconds, used by scrobbling. */
+expect fun epochSeconds(): Long
+
 /** "web" or "desktop" — used for a small badge in the UI. */
 expect fun platformName(): String
 

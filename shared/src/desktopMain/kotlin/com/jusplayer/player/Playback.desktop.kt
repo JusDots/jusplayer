@@ -46,6 +46,13 @@ actual object Playback {
 
     actual fun currentVideoId(): String? = engine.currentVideoId().ifBlank { null }
 
+    /**
+     * The desktop engine reads [AudioProfile] whenever it opens a stream, and
+     * the settings screen re-opens the current one after a change, so there is
+     * nothing to push here.
+     */
+    actual fun uploadAudioProfile() = Unit
+
     /** The track that follows the current one — used for the crossfade. */
     private fun nextVideoId(): String? {
         val next = PlayerState.queue.getOrNull(PlayerState.index + 1) ?: return null

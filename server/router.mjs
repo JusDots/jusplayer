@@ -14,7 +14,7 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -195,13 +195,28 @@ const AUDIO_CLIENTS = [ANDROID_CLIENT, IOS_CLIENT, ANDROID_VR_CLIENT];
 // ---------------------------------------------------------------- yt-dlp ---
 
 let ytDlpState = null;
+let ytDlpBinary = null;
+
+/**
+ * Where yt-dlp lives.
+ *
+ * Locally it is usually on `$PATH`. On Vercel the build stages a static
+ * PyInstaller binary in `bin/`, which is bundled with the function through
+ * `includeFiles` in vercel.json.
+ */
+function ytDlpBinaryPath() {
+  if (ytDlpBinary) return ytDlpBinary;
+  const staged = path.resolve(__dirname, "../bin/yt-dlp");
+  ytDlpBinary = existsSync(staged) ? staged : (process.env.YT_DLP_PATH || "yt-dlp");
+  return ytDlpBinary;
+}
 
 /** Is yt-dlp installed? It is the only way to get unrestricted stream URLs. */
 export function ytDlpAvailable() {
   if (ytDlpState === null) {
     try {
       ytDlpState =
-        spawnSync("yt-dlp", ["--version"], { encoding: "utf8", timeout: 10_000 }).status === 0;
+        spawnSync(ytDlpBinaryPath(), ["--version"], { encoding: "utf8", timeout: 15_000 }).status === 0;
     } catch {
       ytDlpState = false;
     }
@@ -220,7 +235,7 @@ export function ytDlpAvailable() {
 function resolveWithYtDlp(videoId) {
   if (!ytDlpAvailable()) return null;
   const result = spawnSync(
-    "yt-dlp",
+    ytDlpBinaryPath(),
     [
       "--no-playlist",
       "--no-warnings",
@@ -1307,10 +1322,31 @@ const MIME = {
 };
 
 const CORS = {
-  "access-control-allow-origin": "*",
   "access-control-allow-headers": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
 };
+
+/** Origins that may read the API with cookies (the Wasm dev server). */
+const DEV_ORIGINS = new Set([
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+]);
+
+/**
+ * Echo the caller's origin only when it is us.
+ *
+ * `access-control-allow-origin: *` cannot be combined with credentials, and
+ * reflecting every origin would let any site read the signed-in account. The
+ * dev server is the one cross-origin caller we care about.
+ */
+function applyCors(req, res, selfOrigin) {
+  const origin = req.headers.origin;
+  if (!origin) return;
+  if (!DEV_ORIGINS.has(origin) && origin !== selfOrigin) return;
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("access-control-allow-credentials", "true");
+  res.setHeader("vary", "origin");
+}
 
 function sendJson(res, status, value) {
   const body = JSON.stringify(value);
@@ -1402,6 +1438,7 @@ export async function handleRequest(req, res, options = {}) {
   const withStatic = options.static !== false;
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const origin = requestOrigin(req, url);
+  applyCors(req, res, origin);
   const isSecure = origin.startsWith("https:");
   const redirectUri = process.env.YT_REDIRECT_URI || `${origin}/api/auth/callback`;
 
@@ -1417,6 +1454,9 @@ export async function handleRequest(req, res, options = {}) {
         service: "jusplayer-web",
         uptime: process.uptime(),
         oauth: oauthConfigured(),
+        // Whole-track playback/downloads need yt-dlp; without it YouTube
+        // caps each CDN URL at about one megabyte.
+        wholeTracks: ytDlpAvailable(),
       });
     }
 

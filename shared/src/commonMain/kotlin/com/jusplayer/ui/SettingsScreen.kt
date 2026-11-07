@@ -20,12 +20,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +48,9 @@ import com.jusplayer.data.Stats
 import com.jusplayer.data.YtMusicApi
 import com.jusplayer.player.Playback
 import com.jusplayer.player.PlayerState
+import com.jusplayer.platform.DiscordPresence
+import com.jusplayer.platform.LocalFiles
+import com.jusplayer.platform.Scrobbler
 import com.jusplayer.platform.openExternal
 import com.jusplayer.platform.platformName
 import kotlinx.coroutines.launch
@@ -51,6 +59,8 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(api: YtMusicApi) {
     val scope = rememberCoroutineScope()
     val account = AccountState.account
+    var discordClientId by remember { mutableStateOf(DiscordPresence.clientId) }
+    var listenBrainzToken by remember { mutableStateOf(Scrobbler.token) }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -263,7 +273,16 @@ fun SettingsScreen(api: YtMusicApi) {
                         style = MaterialTheme.typography.bodySmall,
                         color = JusMuted,
                     )
-
+                } else {
+                    Text(
+                        "Downloaded tracks play through Web Audio, so these settings change them for real. " +
+                            "YouTube's streamed player cannot be routed through Web Audio, so streamed audio " +
+                            "keeps YouTube's own output — download a track to hear the difference.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                }
+                run {
                     AudioToggle(
                         title = "Equalizer",
                         subtitle = "Five bands, ±12 dB, like the mobile app.",
@@ -314,7 +333,9 @@ fun SettingsScreen(api: YtMusicApi) {
                         checked = AudioProfile.loudnessEnabled,
                         onChange = { AudioProfile.updateLoudnessEnabled(it); reapplyAudio() },
                     )
+                }
 
+                if (platformName() == "desktop") {
                     Text("Crossfade", style = MaterialTheme.typography.titleSmall, color = JusText)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(0, 3, 6, 9, 12).forEach { seconds ->
@@ -340,9 +361,8 @@ fun SettingsScreen(api: YtMusicApi) {
                     }
                 } else {
                     Text(
-                        "The browser plays through YouTube's own player, which cannot be routed through the " +
-                            "Web Audio API. Downloaded tracks and local files are decoded by the app instead, and " +
-                            "those do get the equalizer, spatial widening and loudness normalisation.",
+                        "Crossfade is applied by the desktop audio engine; the browser hands each track " +
+                            "to YouTube one at a time.",
                         style = MaterialTheme.typography.bodySmall,
                         color = JusMuted,
                     )
@@ -425,8 +445,13 @@ fun SettingsScreen(api: YtMusicApi) {
                         color = JusText,
                     )
                     Text(
-                        "Saved in the app's data folder. Downloaded tracks play offline and keep the audio " +
-                            "settings above.",
+                        if (platformName() == "desktop") {
+                            "Saved in the app's data folder. Downloaded tracks play offline and keep the " +
+                                "audio settings above."
+                        } else {
+                            "Saved in this browser (IndexedDB). They play offline and get the audio settings " +
+                                "above, unlike streamed tracks."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = JusMuted,
                     )
@@ -497,7 +522,7 @@ fun SettingsScreen(api: YtMusicApi) {
             }
         }
 
-        item { SectionHeader("Not possible on the web") }
+        item { SectionHeader("Local files") }
         item {
             Column(
                 modifier = Modifier
@@ -505,25 +530,219 @@ fun SettingsScreen(api: YtMusicApi) {
                     .clip(RoundedCornerShape(16.dp))
                     .background(JusSurfaceHigh)
                     .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (!LocalFiles.available) {
+                    Text("Not available in this build", style = MaterialTheme.typography.titleSmall, color = JusText)
+                } else {
+                    Text(
+                        "Files already on this device are opened directly — nothing is uploaded. On the web " +
+                            "they are copied into IndexedDB so they survive a reload.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                    if (LocalFiles.items.isEmpty()) {
+                        Text(
+                            "Nothing imported yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JusMuted,
+                        )
+                    } else {
+                        LocalFiles.items.forEach { track ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        track.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = JusText,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        listOfNotNull(
+                                            track.artist.takeIf { it.isNotBlank() },
+                                            formatBytes(track.bytes),
+                                        ).joinToString(" · "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = JusMuted,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        PlayerState.playQueue(
+                                            listOf(
+                                                MediaItem(
+                                                    id = track.id,
+                                                    title = track.title,
+                                                    subtitle = track.artist,
+                                                    kind = "song",
+                                                    videoId = track.id,
+                                                ),
+                                            ),
+                                            0,
+                                        )
+                                    },
+                                ) { Text("Play", color = JusGreen) }
+                                TextButton(onClick = { LocalFiles.remove(track) }) {
+                                    Text("Remove", color = JusMuted)
+                                }
+                            }
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                val added = LocalFiles.pickAndImport()
+                                Notices.show(
+                                    if (added > 0) "Added $added file${if (added == 1) "" else "s"}"
+                                    else "No files added",
+                                )
+                            }
+                        },
+                    ) {
+                        Text("Add audio files…", color = JusGreen)
+                    }
+                }
+            }
+        }
+
+        item { SectionHeader("Integrations") }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(JusSurfaceHigh)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (DiscordPresence.available) {
+                    Text("Discord rich presence", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Text(
+                        "Shows the current track in your Discord profile. Create an application at " +
+                            "discord.com/developers/applications and paste its client id — no bot token needed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                    OutlinedTextField(
+                        value = discordClientId,
+                        onValueChange = { discordClientId = it },
+                        label = { Text("Discord client id") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                DiscordPresence.configure(discordClientId)
+                                Notices.show(
+                                    if (DiscordPresence.configured) "Discord presence enabled"
+                                    else "Discord presence disabled",
+                                )
+                            },
+                        ) { Text("Save", color = JusGreen) }
+                        if (DiscordPresence.configured) {
+                            TextButton(
+                                onClick = {
+                                    DiscordPresence.clear()
+                                    DiscordPresence.configure("")
+                                    discordClientId = ""
+                                    Notices.show("Discord presence disabled")
+                                },
+                            ) { Text("Turn off", color = JusMuted) }
+                        }
+                    }
+                } else {
+                    Text("Discord rich presence", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Text(
+                        "Available in the desktop app and the terminal client, which can reach Discord's " +
+                            "local IPC socket. Browsers cannot.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                if (Scrobbler.available) {
+                    Text("ListenBrainz scrobbling", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Text(
+                        "Create a token at listenbrainz.org/settings and paste it here. Plays are submitted " +
+                            "after half the track (or 30 seconds), so skipping does not count.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                    OutlinedTextField(
+                        value = listenBrainzToken,
+                        onValueChange = { listenBrainzToken = it },
+                        label = { Text("ListenBrainz user token") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                Scrobbler.configure(listenBrainzToken)
+                                Notices.show(
+                                    if (Scrobbler.token.isNotBlank()) "Scrobbling enabled" else "Scrobbling disabled",
+                                )
+                            },
+                        ) { Text("Save", color = JusGreen) }
+                        if (Scrobbler.token.isNotBlank()) {
+                            TextButton(
+                                onClick = {
+                                    Scrobbler.configure("")
+                                    listenBrainzToken = ""
+                                    Notices.show("Scrobbling disabled")
+                                },
+                            ) { Text("Disconnect", color = JusMuted) }
+                        }
+                    }
+                } else {
+                    Text("ListenBrainz scrobbling", style = MaterialTheme.typography.titleSmall, color = JusText)
+                    Text(
+                        "Available in the desktop app; the browser cannot call ListenBrainz directly.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JusMuted,
+                    )
+                }
+            }
+        }
+
+        item { SectionHeader("Platform support") }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(JusSurfaceHigh)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Text(
-                    "These mobile features need native Android APIs that browsers do not expose:",
+                    "One shared Compose UI, three shells. Everything marked ✓ works today.",
                     style = MaterialTheme.typography.bodySmall,
                     color = JusMuted,
                 )
-                Spacer(Modifier.height(8.dp))
-                listOf(
-                    "Offline downloads, local-file playback, cache management",
-                    "System equalizer, spatial audio, EBU R128 loudness, crossfade",
-                    "Pitch shifting and tempo change independent of speed",
-                    "ShazamKit music recognition and Spotify playlist import",
-                    "Last.fm / ListenBrainz scrobbling and Discord rich presence",
-                    "Subsonic servers and music-together sessions",
-                    "Synced lyrics translation, romanization and word-by-word timing",
-                ).forEach { line ->
-                    Text("•  $line", style = MaterialTheme.typography.bodySmall, color = JusText)
-                    Spacer(Modifier.height(4.dp))
-                }
+                Spacer(Modifier.height(4.dp))
+                SupportRow("", "web", "desktop", "tui", header = true)
+                SupportRow("Browsing & search", "✓", "✓", "✓")
+                SupportRow("Streaming", "YouTube", "native", "mpv")
+                SupportRow("Offline downloads", "IndexedDB", "disk", "folder")
+                SupportRow("Equalizer / spatial / loudness", "saved audio", "all audio", "—")
+                SupportRow("Crossfade", "—", "✓", "—")
+                SupportRow("Local file import", "✓", "✓", "—")
+                SupportRow("Synced lyrics", "✓", "✓", "✓")
+                SupportRow("Discord rich presence", "—", "✓", "✓")
+                SupportRow("ListenBrainz scrobbling", "—", "✓", "—")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Web audio is limited by the browser: YouTube's embedded player cannot be routed " +
+                        "through Web Audio, so the equalizer applies to downloaded and imported tracks. " +
+                        "Everything else in this list is platform-independent.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JusMuted,
+                )
             }
         }
 
@@ -601,7 +820,10 @@ private fun LabelledSlider(
  * position, so the only cost is a few milliseconds of silence.
  */
 private fun reapplyAudio() {
+    // Web: push the profile into the live Web Audio chain.
+    Playback.uploadAudioProfile()
     if (platformName() != "desktop") return
+    // Desktop: re-open the stream so ffmpeg rebuilds its filter chain.
     val at = Playback.position()
     if (Playback.isReady()) Playback.seek(at)
 }
@@ -651,4 +873,35 @@ private fun formatBytes(bytes: Long): String {
 private fun round1(value: Double): String {
     val scaled = (value * 10).toInt()
     return "${scaled / 10}.${scaled % 10}"
+}
+
+/** One row of the platform-support matrix. */
+@Composable
+private fun SupportRow(
+    feature: String,
+    web: String,
+    desktop: String,
+    tui: String,
+    header: Boolean = false,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            feature,
+            style = if (header) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
+            color = if (header) JusMuted else JusText,
+            modifier = Modifier.weight(2.2f),
+        )
+        listOf(web, desktop, tui).forEach { value ->
+            Text(
+                value,
+                style = MaterialTheme.typography.labelSmall,
+                color = when {
+                    header -> JusMuted
+                    value == "—" -> JusMuted
+                    else -> JusGreen
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
 }

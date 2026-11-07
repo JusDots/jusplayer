@@ -178,6 +178,21 @@ class DesktopAudioEngine(
                 return
             }
 
+            // An imported local file is opened straight from disk.
+            val imported = com.jusplayer.platform.LocalFiles.pathOf(videoId)
+            if (imported != null) {
+                title = com.jusplayer.platform.LocalFiles.items
+                    .firstOrNull { it.id == videoId }?.title.orEmpty()
+                artist = com.jusplayer.platform.LocalFiles.items
+                    .firstOrNull { it.id == videoId }?.artist.orEmpty()
+                expectedDuration = 0.0
+                durationSeconds = 0.0
+                candidates = listOf(Candidate(Candidate.Kind.File, imported))
+                val started = startSource(videoId, candidates.first(), 0.0, myGeneration) ?: return
+                ready = true
+                return
+            }
+
             val base = gatewayBase()
             val info = json.decodeFromString<StreamInfo>(
                 GatewayHttp.get(base, "/api/stream?videoId=$videoId"),

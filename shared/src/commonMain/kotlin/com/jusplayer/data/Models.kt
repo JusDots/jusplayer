@@ -136,7 +136,8 @@ data class Account(
     val email: String = "",
     val avatar: String = "",
     val channelId: String = "",
-    val source: String = "",
+    /** "Google", "YouTube", … or null while signed out. */
+    val source: String? = null,
     val method: String? = null,
     /** True when the deployment has Google OAuth configured. */
     val oauthAvailable: Boolean = false,

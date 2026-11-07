@@ -10,7 +10,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -100,6 +100,45 @@ if (!skipBuild) {
 } else {
   console.log("▸ Skipping the Gradle build (pre-built bundle expected).");
 }
+
+/**
+ * Stage a static yt-dlp binary next to the serverless function.
+ *
+ * YouTube's plain InnerTube URLs stop after about 1 MB, which is fine for the
+ * first minute of a song but breaks long playback and offline downloads. The
+ * gateway uses yt-dlp when it is available; on Vercel we ship the static
+ * Linux build with the function (see `includeFiles` in vercel.json).
+ */
+async function stageYtDlp() {
+  if (process.env.JUSPLAYER_SKIP_YTDLP === "1") return;
+  if (!process.env.VERCEL && process.env.JUSPLAYER_YTDLP !== "1") return;
+
+  const dir = path.join(root, "bin");
+  const target = path.join(dir, "yt-dlp");
+  if (await exists(target)) {
+    console.log("▸ yt-dlp already staged in bin/");
+    return;
+  }
+
+  const url =
+    process.env.JUSPLAYER_YTDLP_URL ||
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+  try {
+    console.log("▸ Downloading yt-dlp (for whole-track playback and downloads)…");
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(240_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length < 5_000_000) throw new Error(`unexpected size: ${buffer.length} bytes`);
+    await mkdir(dir, { recursive: true });
+    await writeFile(target, buffer, { mode: 0o755 });
+    console.log(`  staged ${(buffer.length / 1e6).toFixed(1)} MB at bin/yt-dlp`);
+  } catch (err) {
+    console.warn(`! yt-dlp download failed (${err.message})`);
+    console.warn("  Hosted playback and downloads will be limited to YouTube's ~1 MB URLs.");
+  }
+}
+
+await stageYtDlp();
 
 if (!(await exists(path.join(dist, "index.html")))) {
   console.error(`✗ No web build found at ${dist}`);

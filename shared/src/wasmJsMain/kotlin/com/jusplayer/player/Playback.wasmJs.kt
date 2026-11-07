@@ -39,6 +39,9 @@ private external fun jsConsumeEnded(): Boolean
 @JsFun("() => (window.jusPlayer ? window.jusPlayer.currentVideoId() : null)")
 private external fun jsCurrentVideoId(): String?
 
+@JsFun("(json) => { if (window.jusPlayer) window.jusPlayer.applyAudio(json); }")
+private external fun jsApplyAudio(json: String)
+
 /**
  * Actual playback on the web: audio comes from a YouTube IFrame player that is
  * driven by the glue code in index.html. We never touch raw stream URLs.
@@ -57,4 +60,10 @@ actual object Playback {
     actual fun isReady(): Boolean = jsReady()
     actual fun consumeEnded(): Boolean = jsConsumeEnded()
     actual fun currentVideoId(): String? = jsCurrentVideoId()
+
+    actual fun uploadAudioProfile() {
+        val profile = com.jusplayer.audio.AudioProfile
+        val payload = """{"equalizer":${profile.equalizerEnabled},"gains":[${profile.gains.joinToString(",")}],"preamp":${profile.preamp},"spatial":${profile.spatialEnabled},"width":${profile.spatialWidth},"loudness":${profile.loudnessEnabled}}"""
+        jsApplyAudio(payload)
+    }
 }

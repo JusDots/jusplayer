@@ -12,14 +12,16 @@ import { DiscordPresence } from "./discord.mjs";
 import { Player, ensureMusicDir } from "./player.mjs";
 import {
   ansi,
-  bar,
   box,
-  centre,
+  chip,
+  clip,
   color,
+  dot,
+  equalizer,
   formatTime,
   meter,
   pad,
-  rule,
+  progressBar,
   truncate,
   width,
 } from "./ui.mjs";
@@ -30,7 +32,7 @@ const KEYS = {
   home: { key: "h", label: "home" },
   search: { key: "/", label: "search" },
   library: { key: "l", label: "library" },
-  queue: { key: "q", label: "queue" },
+  queue: { key: "u", label: "queue" },
   lyrics: { key: "y", label: "lyrics" },
   help: { key: "?", label: "help" },
 };
@@ -44,6 +46,8 @@ export class App {
     this.message = "";
     this.messageKind = "info";
     this.rows = [];
+    this.homeRows = [];
+    this.listTitle = "";
     this.rowCursor = 0;
     this.scroll = 0;
     this.status = "starting…";
@@ -146,6 +150,8 @@ export class App {
     try {
       const feed = await this.gateway.home();
       this.rows = flatten(feed);
+      this.homeRows = this.rows;
+      this.listTitle = "";
       this.rowCursor = 0;
       this.scroll = 0;
       this.setMessage(`${this.rows.length} items`);
@@ -215,6 +221,44 @@ export class App {
     return this.index >= 0 ? this.queue[this.index] : null;
   }
 
+  /** Enter on a track plays it; Enter on a playlist or album opens it. */
+  async activateRow(rowIndex) {
+    const item = this.rows[rowIndex];
+    if (!item) return;
+    if (item.videoId) return this.playRow(rowIndex);
+    if (item.browseId && (item.kind === "playlist" || item.kind === "album")) {
+      return this.openCollection(item);
+    }
+    this.setMessage("That is not a playable track.", "warn");
+    this.render();
+  }
+
+  async openCollection(item) {
+    this.busy = true;
+    this.setMessage(`Opening “${item.title}”…`);
+    this.render();
+    try {
+      const feed =
+        item.kind === "album"
+          ? await this.gateway.album(item.browseId)
+          : await this.gateway.playlist(item.browseId);
+      const tracks = flatten(feed).filter((row) => row.videoId);
+      if (!tracks.length) {
+        this.setMessage("This collection has no playable tracks.", "warn");
+      } else {
+        this.rows = tracks;
+        this.rowCursor = 0;
+        this.scroll = 0;
+        this.listTitle = item.title || "collection";
+        this.setMessage(`${tracks.length} tracks · Enter to play`);
+      }
+    } catch (error) {
+      this.setMessage(`Could not open this ${item.kind}: ${error.message}`, "error");
+    }
+    this.busy = false;
+    this.render();
+  }
+
   async playRow(rowIndex) {
     const item = this.rows[rowIndex];
     if (!item || !item.videoId) {
@@ -265,7 +309,7 @@ export class App {
         item.videoId,
         item.title,
         item.subtitle,
-        item.durationSeconds || 0,
+        rowSeconds(item),
       );
       const raw = response.syncedLyrics || response.lyrics || "";
       this.lyrics = { lines: parseLrc(raw), title: item.title, plain: raw };
@@ -408,15 +452,17 @@ export class App {
         this.previous();
         return;
       case "j":
+      case "down":
       case "\x1b[B":
         this.moveCursor(1);
         return;
       case "k":
+      case "up":
       case "\x1b[A":
         this.moveCursor(-1);
         return;
       case "\r":
-        this.playRow(this.rowCursor);
+        this.activateRow(this.rowCursor);
         return;
       case "g":
         this.moveCursor(-this.rows.length);
@@ -425,9 +471,13 @@ export class App {
         this.moveCursor(this.rows.length);
         return;
       case "s":
+      case "left":
+      case "\x1b[D":
         this.player.seek(this.player.state.position - 10);
         return;
       case "d":
+      case "right":
+      case "\x1b[C":
         this.player.seek(this.player.state.position + 10);
         return;
       case "e":
@@ -467,6 +517,7 @@ export class App {
         if (this.view !== "home") {
           this.view = "home";
           this.rows = this.homeRows || [];
+          this.listTitle = "";
           this.render();
         }
         return;
@@ -475,7 +526,7 @@ export class App {
     }
 
     if (number >= 0 && number <= 9) {
-      this.playRow(number - 1);
+      this.activateRow(number - 1);
       return;
     }
 
@@ -533,70 +584,87 @@ export class App {
 
     const header = this.drawHeader(cols);
     const nowPlaying = this.drawNowPlaying(cols);
+    const footer = this.drawFooter(cols);
     lines.push(...header, "", ...nowPlaying);
 
     // header + blank + now playing + blank + body box + blank + footer
-    const chrome = header.length + 1 + nowPlaying.length + 1 + 1 + 1;
+    const chrome = header.length + 1 + nowPlaying.length + 1 + 1 + footer.length;
     const boxHeight = Math.max(4, rows - chrome);
     const contentHeight = Math.max(2, boxHeight - 2);
 
     const body = this.drawBody(cols, contentHeight);
-    lines.push(...body, "", ...this.drawFooter(cols));
+    lines.push("", ...body, "", ...footer);
 
     // Never write more rows than the terminal has — that would scroll the
     // header out of view.
     const overflow = lines.length - rows;
     if (overflow > 0) lines.splice(lines.length - overflow - 1, overflow);
 
-    let output = ansi.home + ansi.clear;
-    for (const line of lines) output += `${ansi.clearLine}${line}\n`;
+    // Repaint in place instead of clearing the whole screen: each line is
+    // cleared as it is written, and anything below the last line is wiped.
+    // This keeps the now-playing equaliser from flashing on every tick.
+    let output = ansi.home;
+    output += lines.map((line) => `${ansi.clearLine}${line}`).join("\n");
+    output += ansi.clearDown;
     process.stdout.write(output);
     this.renderedLines = lines.length;
   }
 
   drawHeader(cols) {
-    const title = `${color.accent}${ansi.bold}♪ JusPlayer${ansi.reset} ${color.muted}terminal${ansi.reset}`;
-    const tabs = VIEWS.map((view) =>
-      view === this.view
-        ? `${color.accent}${ansi.bold}${view}${ansi.reset}`
-        : `${color.muted}${view}${ansi.reset}`,
-    ).join(color.muted + " │ " + ansi.reset);
+    const brand = `${color.accent}${ansi.bold}♪ JusPlayer${ansi.reset} ${color.faint}terminal${ansi.reset}`;
     const account = this.account?.signedIn
-      ? `${color.accent}●${ansi.reset} ${color.muted}${truncate(this.account.name || "signed in", 24)}${ansi.reset}`
-      : `${color.muted}○ anonymous${ansi.reset}`;
+      ? `${dot()} ${color.muted}${truncate(this.account.name || "signed in", 26)}${ansi.reset}`
+      : `${color.faint}○ anonymous${ansi.reset}`;
+    const gap = Math.max(1, cols - 1 - width(brand) - width(account));
+    const top = truncate(brand + " ".repeat(gap) + account, cols - 1);
 
-    const left = `${title}  ${tabs}`;
-    const gap = Math.max(1, cols - 1 - width(left) - width(account));
-    return [truncate(left + " ".repeat(gap) + account, cols - 1)];
+    const tabs = VIEWS.map((view) =>
+      view === this.view ? chip(view) : `${color.faint} ${view} ${ansi.reset}`,
+    ).join(`${color.border}│${ansi.reset}`);
+
+    return [
+      top,
+      truncate(`  ${tabs}`, cols - 1),
+      `${color.border}${"─".repeat(cols - 1)}${ansi.reset}`,
+    ];
   }
 
   drawNowPlaying(cols) {
     const state = this.player.state;
     const item = this.current;
-    const inner = cols - 4;
+    const inner = cols - 5;
+    const playing = Boolean(item && state.playing);
 
-    const left = item
-      ? `${color.accent}${ansi.bold}${truncate(item.title, inner - 30)}${ansi.reset}\n  ${color.muted}${truncate(item.subtitle || "", inner - 30)}${ansi.reset}`
-      : `${color.muted}Nothing playing — press Enter on a track, or / to search${ansi.reset}`;
-
-    const position = formatTime(state.position);
-    const duration = formatTime(state.duration);
+    const clock = `${color.faint}${formatTime(state.position)}${ansi.reset} ${color.border}/${ansi.reset} ${color.faint}${formatTime(state.duration)}${ansi.reset}`;
     const progress = state.duration > 0 ? state.position / state.duration : 0;
+    const progressWidth = Math.max(12, inner - width(clock) - 2);
 
-    const info = [
-      left,
-      "",
-      `${bar(progress, Math.max(10, inner - 26))} ${color.muted}${position} / ${duration}${ansi.reset}`,
-      `${color.muted}vol${ansi.reset} ${meter(state.volume, 8)} ${color.muted}${Math.round(state.volume * 100)}%${ansi.reset}   ${color.muted}backend${ansi.reset} ${color.text}${this.player.backend}${ansi.reset}${
-        item && !state.playing ? `   ${color.warn}${ansi.bold}❚❚ paused${ansi.reset}` : ""
-      }`,
-    ];
+    const status = !item ? "idle" : playing ? "playing" : "paused";
+    const statusTint = !item ? color.faint : playing ? color.accent : color.warn;
+
+    const info = [];
+    if (item) {
+      info.push(`${equalizer(playing, 6)}  ${color.text}${ansi.bold}${clip(item.title, Math.max(8, inner - 8))}${ansi.reset}`);
+      info.push(`         ${color.muted}${clip(item.subtitle || "", Math.max(8, inner - 9))}${ansi.reset}`);
+    } else {
+      info.push(`${equalizer(false, 6)}  ${color.muted}Nothing playing — press Enter on a track, or / to search${ansi.reset}`);
+    }
+    info.push("");
+    info.push(`${progressBar(progress, progressWidth)}  ${clock}`);
+    info.push(
+      `${color.faint}vol${ansi.reset} ${meter(state.volume, 8)} ${color.muted}${String(Math.round(state.volume * 100)).padStart(3)}%${ansi.reset}` +
+        `   ${color.faint}backend${ansi.reset} ${color.text}${this.player.backend}${ansi.reset}` +
+        `   ${statusTint}● ${status}${ansi.reset}`,
+    );
 
     const lines = box(info, cols - 1, { title: "now playing" });
     if (this.message) {
       const tint = this.messageKind === "error" ? color.error : this.messageKind === "warn" ? color.warn : color.accent2;
-      lines.splice(lines.length - 1, 0, `${color.muted}│${ansi.reset} ${tint}${truncate(this.message, inner)}${ansi.reset} ${color.muted}│${ansi.reset}`);
-      lines[lines.length - 1] = color.muted + `└${"─".repeat(cols - 2)}┘` + ansi.reset;
+      lines.splice(
+        lines.length - 1,
+        0,
+        `${color.border}│${ansi.reset} ${tint}●${ansi.reset} ${truncate(this.message, inner - 2)}${ansi.reset} ${color.border}│${ansi.reset}`,
+      );
     }
     return lines;
   }
@@ -609,18 +677,32 @@ export class App {
   }
 
   drawList(cols, height) {
-    const inner = cols - 4;
+    const inner = cols - 5;
     const lines = [];
 
     if (this.searching) {
       lines.push(
-        `${color.accent2}search ›${ansi.reset} ${color.text}${this.query}${ansi.reset}${color.accent}▏${ansi.reset}`,
+        `${color.accent2}${ansi.bold}search${ansi.reset} ${color.border}›${ansi.reset} ${color.text}${this.query}${ansi.reset}${color.accent}▏${ansi.reset}`,
       );
     }
 
     if (this.busy) lines.push(`${color.muted}loading…${ansi.reset}`);
     if (!this.rows.length && !this.busy) {
-      lines.push(`${color.muted}Nothing here yet.${ansi.reset}`);
+      lines.push(`${color.faint}Nothing here yet.${ansi.reset}`);
+      lines.push(`${color.faint}Press ${ansi.reset}${color.accent}/${ansi.reset}${color.faint} to search YouTube Music.${ansi.reset}`);
+    }
+
+    const numberWidth = String(Math.max(1, this.rows.length)).length + 1;
+    const durationWidth = 6;
+    const subtitleWidth = Math.max(12, Math.min(32, inner - 28));
+    const titleWidth = Math.max(12, inner - numberWidth - subtitleWidth - durationWidth - 4);
+
+    // A small column header makes long lists much easier to scan.
+    if (this.rows.length && !this.searching && height > 6) {
+      lines.push(
+        `${color.faint} ${"#".padStart(numberWidth)} ${pad("TITLE", titleWidth)} ` +
+          `${pad("ARTIST", subtitleWidth)} ${pad("TIME", durationWidth)}${ansi.reset}`,
+      );
     }
 
     const visible = Math.max(1, height - lines.length);
@@ -631,111 +713,191 @@ export class App {
     for (let i = this.scroll; i < Math.min(this.rows.length, this.scroll + visible); i += 1) {
       const row = this.rows[i];
       const active = i === this.rowCursor;
-      const number = String(i + 1).padStart(2, " ");
-      const title = truncate(row.title || "—", Math.max(10, inner - 42));
-      const subtitle = truncate(row.subtitle || "", 22);
-      const duration = row.duration ? formatTime(row.durationSeconds || 0) : "";
-      const marker = active ? `${color.accent}▸${ansi.reset}` : " ";
-      const name = active ? `${color.accent}${ansi.bold}${title}${ansi.reset}` : `${color.text}${title}${ansi.reset}`;
-      const tail = `${color.muted}${pad(subtitle, 24)}${pad(duration, 8)}${ansi.reset}`;
-      lines.push(`${marker} ${color.muted}${number}${ansi.reset} ${name} ${tail}`);
+      const number = String(i + 1).padStart(numberWidth, " ");
+      const title = pad(clip(row.title || "—", titleWidth), titleWidth);
+      const subtitle = clip(row.subtitle || "", subtitleWidth);
+      const duration = row.duration ? formatTime(rowSeconds(row)) : "";
+
+      const line =
+        (active ? color.surfaceHigh : "") +
+        (active ? color.accent : color.border) + (active ? "▌" : " ") +
+        color.faint + `${number} ` +
+        (active ? color.text + ansi.bold : color.text) + title +
+        `${ansi.reset}${active ? color.surfaceHigh : ""}` +
+        color.muted + ` ${pad(subtitle, subtitleWidth)}` +
+        color.faint + ` ${pad(duration, durationWidth)}`;
+      lines.push(pad(line, inner) + ansi.reset);
     }
 
-    const heading =
-      this.view === "search" ? "search results" : this.view === "library" ? "your library" : "home";
-    return box(lines, cols - 1, { title: `${heading}  (${this.rows.length})` });
+    const heading = this.listTitle
+      ? this.listTitle
+      : this.view === "search"
+        ? "search results"
+        : this.view === "library"
+          ? "your library"
+          : "home";
+    return box(lines, cols - 1, { title: `${heading} · ${this.rows.length}`, minHeight: height });
   }
 
   drawQueue(cols, height) {
-    const inner = cols - 4;
+    const inner = cols - 5;
     const lines = [];
     if (!this.queue.length) {
-      lines.push(`${color.muted}The queue is empty.${ansi.reset}`);
+      lines.push(`${color.faint}The queue is empty.${ansi.reset}`);
+      lines.push(`${color.faint}Press ${ansi.reset}${color.accent}/${ansi.reset}${color.faint} to find something to play.${ansi.reset}`);
     }
-    for (let i = 0; i < this.queue.length; i += 1) {
+    for (let i = 0; i < Math.min(this.queue.length, height - lines.length); i += 1) {
       const row = this.queue[i];
       const active = i === this.index;
-      const marker = active ? `${color.accent}▸${ansi.reset}` : " ";
-      const title = truncate(row.title || "—", Math.max(10, inner - 30));
-      const name = active ? `${color.accent}${ansi.bold}${title}${ansi.reset}` : `${color.text}${title}${ansi.reset}`;
-      lines.push(`${marker} ${color.muted}${String(i + 1).padStart(2, " ")}${ansi.reset} ${name} ${color.muted}${truncate(row.subtitle || "", 24)}${ansi.reset}`);
+      const number = String(i + 1).padStart(2, " ");
+      const titleWidth = Math.max(10, inner - 39);
+      const title = pad(clip(row.title || "—", titleWidth), titleWidth);
+      const subtitle = clip(row.subtitle || "", 34);
+      const line =
+        (active ? color.surfaceHigh : "") +
+        (active ? color.accent : color.border) + (active ? "▌" : " ") +
+        color.faint + `${number} ` +
+        (active ? color.text + ansi.bold : color.text) + title +
+        `${ansi.reset}${active ? color.surfaceHigh : ""}` +
+        color.muted + ` ${pad(subtitle, 34)}`;
+      lines.push(pad(line, inner) + ansi.reset);
     }
-    return box(lines.slice(0, height), cols - 1, { title: `queue  (${this.queue.length})` });
+    return box(lines, cols - 1, { title: `queue · ${this.queue.length}`, minHeight: height });
   }
 
   drawLyrics(cols, height) {
-    const inner = cols - 4;
+    const inner = cols - 5;
     const lines = [];
     if (!this.lyrics.lines.length) {
-      lines.push(`${color.muted}No lyrics for this track yet.${ansi.reset}`);
-      if (this.lyrics.plain) lines.push("", truncate(this.lyrics.plain, inner));
+      if (this.lyrics.plain) {
+        lines.push(`${color.faint}unsynced lyrics${ansi.reset}`);
+        lines.push("");
+        const plain = String(this.lyrics.plain)
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(0, Math.max(0, height - 2));
+        for (const line of plain) {
+          lines.push(`${color.muted}${clip(line, inner)}${ansi.reset}`);
+        }
+      } else {
+        lines.push(`${color.faint}No lyrics for this track yet.${ansi.reset}`);
+      }
     } else {
       const start = Math.max(0, this.lyricIndex - Math.floor(height / 2));
       for (let i = start; i < Math.min(this.lyrics.lines.length, start + height); i += 1) {
         const line = this.lyrics.lines[i];
-        const text = truncate(line.text, inner);
+        const text = clip(line.text, inner - 2);
         if (i === this.lyricIndex) {
-          lines.push(`${color.accent}${ansi.bold}${text}${ansi.reset}`);
+          lines.push(`${color.accent}${ansi.bold}▌ ${text}${ansi.reset}`);
         } else {
-          lines.push(`${color.muted}${text}${ansi.reset}`);
+          lines.push(`${color.border}│${ansi.reset} ${color.muted}${text}${ansi.reset}`);
         }
       }
     }
-    return box(lines, cols - 1, { title: `lyrics — ${this.lyrics.title || "—"}` });
+    return box(lines, cols - 1, { title: `lyrics · ${this.lyrics.title || "—"}`, minHeight: height });
   }
 
   drawHelp(cols, height) {
-    const rows = [
-      ["space", "play / pause"],
-      ["n / p", "next / previous track"],
-      ["← / →", "seek 10 seconds back / forward"],
-      ["0-9", "play the numbered track"],
-      ["j / k", "move down / up the list"],
-      ["g / G", "jump to the top / bottom"],
-      ["/", "search"],
-      ["h l q y", "home · library · queue · lyrics"],
-      ["+ / - / m", "volume up / down / mute"],
-      ["e", "restart the track"],
-      ["w", "download the track for offline listening"],
-      ["r", "reload the current view"],
-      ["?", "toggle this help"],
-      ["q", "quit"],
+    const inner = cols - 5;
+    const sections = [
+      ["playback", [
+        ["space", "play / pause"],
+        ["n / p", "next / previous"],
+        ["← / →", "seek 10 seconds"],
+        ["+ / -", "volume"],
+        ["m", "mute"],
+        ["e", "restart track"],
+        ["w", "download track"],
+      ]],
+      ["browse", [
+        ["enter", "play or open"],
+        ["j / k", "move down / up"],
+        ["g / G", "top / bottom"],
+        ["0-9", "play numbered"],
+        ["/", "search"],
+        ["r", "reload view"],
+        ["esc", "back home"],
+      ]],
+      ["views", [
+        ["h", "home"],
+        ["l", "library"],
+        ["u", "queue"],
+        ["y", "lyrics"],
+        ["?", "this help"],
+        ["q", "quit"],
+      ]],
     ];
-    const lines = rows.map(([key, description]) => {
-      return `${color.accent}${pad(key, 10)}${ansi.reset}${color.text}${description}${ansi.reset}`;
+
+    const gap = 3;
+    const columnWidth = Math.max(16, Math.floor((inner - gap * (sections.length - 1)) / sections.length));
+    const rendered = sections.map(([title, rows]) => {
+      const lines = [`${color.accent2}${ansi.bold}${title.toUpperCase()}${ansi.reset}`];
+      for (const [key, description] of rows) {
+        lines.push(
+          `${color.accent}${pad(key, 9)}${ansi.reset}${color.text}${clip(description, columnWidth - 9)}${ansi.reset}`,
+        );
+      }
+      return lines;
     });
-    lines.push("");
-    lines.push(`${color.muted}Audio backend:${ansi.reset} ${color.text}${this.player.backend}${ansi.reset}`);
+
+    const lines = [];
+    const rowCount = Math.max(...rendered.map((column) => column.length));
+    for (let i = 0; i < rowCount; i += 1) {
+      lines.push(rendered.map((column) => pad(column[i] || "", columnWidth)).join(" ".repeat(gap)));
+    }
+
     lines.push(
-      `${color.muted}Discord:${ansi.reset} ${color.text}${
-        this.discord.enabled ? (this.discord.connected ? "connected" : "configured (Discord not running?)") : "not configured"
-      }${ansi.reset}`,
+      "",
+      `${color.faint}backend${ansi.reset} ${color.text}${this.player.backend}${ansi.reset}   ` +
+        `${color.faint}discord${ansi.reset} ${color.text}${
+          this.discord.enabled ? (this.discord.connected ? "connected" : "configured") : "off"
+        }${ansi.reset}`,
+      `${color.faint}gateway${ansi.reset} ${color.text}${this.gateway.base}${ansi.reset}`,
     );
-    lines.push(`${color.muted}Gateway:${ansi.reset} ${color.text}${this.gateway.base}${ansi.reset}`);
-    return box(lines, cols - 1, { title: "keyboard shortcuts" });
+
+    return box(lines.slice(0, Math.max(0, height)), cols - 1, { title: "keyboard shortcuts", minHeight: height });
   }
 
   drawFooter(cols) {
     const hints = [
-      "space play",
-      "n/p next",
-      "enter play row",
-      "/ search",
-      "l library",
-      "q queue",
-      "y lyrics",
-      "w download",
-      "? help",
-      "q quit",
+      ["space", "play"],
+      ["enter", "open"],
+      ["/", "search"],
+      ["u", "queue"],
+      ["?", "help"],
     ];
-    const status = this.busy ? `${color.warn}working…${ansi.reset}` : `${color.muted}${this.status}${ansi.reset}`;
-    const left = hints.map((hint) => `${color.muted}${hint}${ansi.reset}`).join(`${color.muted} · ${ansi.reset}`);
-    const gap = Math.max(1, cols - 1 - width(left) - width(this.status));
-    return [truncate(`${left}${" ".repeat(gap)}${status}`, cols - 1)];
+    const kind = this.messageKind === "error" ? "error" : this.busy ? "warn" : "ok";
+    const right = `${dot(kind)} ${color.faint}${this.busy ? "working…" : this.status}${ansi.reset}`;
+
+    // Keep the status visible on narrow terminals: drop hints from the end
+    // until the two sides fit.
+    const separator = `${color.border}  ${ansi.reset}`;
+    let left = "";
+    for (const [key, action] of hints) {
+      const hint = `${color.accent}${key}${ansi.reset}${color.faint} ${action}${ansi.reset}`;
+      const candidate = left ? `${left}${separator}${hint}` : hint;
+      if (width(candidate) + 1 + width(right) > cols - 1) break;
+      left = candidate;
+    }
+
+    const gap = Math.max(1, cols - 1 - width(left) - width(right));
+    return [
+      `${color.border}${"─".repeat(cols - 1)}${ansi.reset}`,
+      truncate(`${left}${" ".repeat(gap)}${right}`, cols - 1),
+    ];
   }
 }
 
 // ------------------------------------------------------------------ helpers --
+
+/** Seconds for a row, whose length may be a number or a "3:42" string. */
+function rowSeconds(row) {
+  if (Number.isFinite(row?.durationSeconds)) return row.durationSeconds;
+  const text = String(row?.duration || "");
+  if (!/^\d+(?::\d{1,2}){0,2}$/.test(text)) return 0;
+  return text.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+}
 
 function flatten(feed) {
   if (!feed) return [];

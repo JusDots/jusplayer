@@ -5,6 +5,11 @@ private external fun jsApiBase(): String
 
 actual fun apiBase(): String = jsApiBase()
 
+@JsFun("() => Math.floor(Date.now() / 1000)")
+private external fun jsEpochSeconds(): Double
+
+actual fun epochSeconds(): Long = jsEpochSeconds().toLong()
+
 actual fun platformName(): String = "web"
 
 @JsFun("(url) => { window.open(url, '_blank', 'noopener'); }")
@@ -43,7 +48,15 @@ actual fun artworkAccent(): Int? = jsArtworkAccent().takeIf { it != 0 }
     if (status === 'bad_state') return 'That sign-in link expired. Please try again.';
     if (status === 'access_denied') {
       return 'Google blocked the sign-in' + (reason ? ': ' + reason : '.') +
-        ' If the app is still in testing mode, add this Google account as a test user.';
+        ' If the app is still in testing mode, add this Google account as a test user, or publish the app.';
+    }
+    if (status === 'org_internal') {
+      return 'This Google OAuth client only allows accounts inside its organisation. ' +
+        'Set the consent screen user type to External, or sign in with a cookie.';
+    }
+    if (status === 'admin_policy_enforced') {
+      return 'Your Google Workspace administrator blocks this app. Ask them to allow it, ' +
+        'or sign in with a cookie.';
     }
     const where = stage ? ' (' + stage + ')' : '';
     const why = reason ? ': ' + reason : '.';

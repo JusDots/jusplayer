@@ -23,3 +23,6 @@ public/
 
 # desktop packaging output
 dist/
+
+# Staged at build time for the Vercel function
+bin/yt-dlp

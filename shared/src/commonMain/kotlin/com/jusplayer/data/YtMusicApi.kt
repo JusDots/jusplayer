@@ -25,6 +25,9 @@ class YtMusicApi(private val base: String = apiBase()) {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
+        // The gateway uses null for "not signed in" (source, method, …). Treat
+        // nulls as the field default instead of failing the whole response.
+        coerceInputValues = true
     }
 
     private val client = HttpClient {

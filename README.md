@@ -94,19 +94,52 @@ curl 'http://localhost:8787/api/collection?id=VLRDCLAK5uy_...'
 
 ## Desktop builds (Windows / Linux)
 
-The desktop shells reuse the exact same `shared/` Compose UI:
+The desktop shells reuse the exact same `shared/` Compose UI, plus a native
+audio engine: ffmpeg decodes the track into raw PCM and Java Sound plays it, so
+there is no browser in the loop. That is what makes the equalizer, spatial
+widening, loudness normalisation, crossfade, offline downloads and the seek bar
+real on the desktop.
 
 ```bash
-./gradlew :windows:run     # or :windows:packageMsi / :windows:createDistributable
-./gradlew :linux:run       # or :linux:packageDeb   / :linux:packageRpm
+./gradlew :linux:run                     # run from Gradle
+./scripts/package-desktop.sh             # app image + dist/jusplayer-linux-x64.tar.gz
+./scripts/package-desktop.sh --deb       # plus .deb/.rpm when dpkg-deb/rpmbuild exist
+
+./gradlew :windows:run                   # on Windows
+.\gradlew.bat :windows:createDistributable
+.\gradlew.bat :windows:packageMsi        # needs WiX, run on Windows
 ```
 
-`packageMsi` must run on Windows; `packageDeb`/`packageRpm` must run on Linux.
-The gateway is required on desktop too (`node server/index.mjs`).
+jpackage cannot cross-compile: `.deb`/`.rpm` have to be built on Linux and the
+`.msi`/`.exe` on Windows. The app image and the `.tar.gz` always work.
 
-**Known limitation:** desktop playback still opens the track in your default
-browser. Search, browsing, queues and the library work fully. Wiring a native
-audio engine (Media3-JVM, VLCJ or a JCEF YouTube view) is the next desktop step.
+Runtime dependencies:
+
+| Tool | Needed for |
+| --- | --- |
+| `ffmpeg` | **required** — decodes every track |
+| `yt-dlp` | optional — whole tracks when YouTube truncates the direct URL |
+| `mpv` | optional — only the terminal client |
+
+The desktop app talks to the gateway too. It prefers a local one
+(`http://127.0.0.1:8787`) because that can serve whole tracks, and falls back to
+<https://jusplayer.vercel.app>. Point it somewhere else with
+`-Djusplayer.api=<url>`, `JUSPLAYER_API=<url>` or Settings → Gateway.
+
+Downloads are stored per-user (`~/.local/share/jusplayer/downloads`,
+`%APPDATA%\JusPlayer\downloads`, `~/Library/Application Support/JusPlayer`) and
+play with no network at all. Settings → Audio and Settings → Offline drive the
+engine and the download list.
+
+### Terminal client
+
+`tui/` is a full client as well: browse, search, library, queue, synced lyrics,
+downloads and Discord rich presence, on top of `mpv`. See
+[`tui/README.md`](tui/README.md).
+
+```bash
+cd tui && node src/main.mjs
+```
 
 ---
 
@@ -206,9 +239,30 @@ Without an account everything still works — the home feed falls back to curate
 public shelves.
 
 > **Current deployment:** the live site at <https://jusplayer.vercel.app> has
-> `JUSPLAYER_SECRET` set but no Google OAuth client yet, so *Settings → Account*
-> offers the cookie sign-in only. Add `YT_CLIENT_ID` / `YT_CLIENT_SECRET` (and
-> redeploy) to switch on the one-click *Sign in with Google* button.
+> Google OAuth configured; *Settings → Account* shows **Sign in with Google**
+> (`/api/health` reports `"oauth":true`). The cookie paste remains as a fallback.
+
+### If Google blocks the sign-in
+
+Google shows the failure **on its own page**, before it ever returns to
+JusPlayer. The block of text headed *Request details* is only the parameters it
+received — the actual error is the headline above it. The common ones:
+
+| Google says | Fix |
+| --- | --- |
+| `Error 403: access_denied` and mentions testing / verification | The OAuth consent screen is in **Testing**. Add the Google address under **Test users**, or click **Publish app**. |
+| `Error 403: org_internal` | The consent screen's **User type** is *Internal*. Change it to **External**. |
+| `Error 403: admin_policy_enforced` | A Google Workspace admin blocks the app; ask them to allow it, or use cookie sign-in. |
+| `Error 400: redirect_uri_mismatch` | The authorised redirect URI must be exactly `https://jusplayer.vercel.app/api/auth/callback` (no trailing slash). |
+
+Open the consent screen for this project directly:
+
+```
+https://console.cloud.google.com/apis/credentials/consent?project=458368175642
+```
+
+The redirect URI itself is registered — requesting `/api/auth/login` reaches
+Google's account chooser rather than failing with `redirect_uri_mismatch`.
 
 ---
 
@@ -268,20 +322,39 @@ Platform-specific code lives behind `expect`/`actual`:
 - [x] Share song link (Web Share API with clipboard fallback)
 - [x] Responsive layout (side rail on wide screens, bottom nav on narrow)
 - [x] Coil image loading through the CORS-safe artwork proxy
+- [x] Offline downloads stored in IndexedDB (survive reload, play without network)
+- [x] Local file import (picked files are copied into IndexedDB)
+- [x] Real Web Audio DSP for downloaded/imported audio: 5-band EQ, preamp,
+      stereo widening, loudness compression
 
-### Upstream Android features that a browser cannot provide
+### Desktop and terminal parity
 
-- [ ] Multi-account switching and subscription management screens
-- [ ] Offline downloads, local-file playback, cache management
-- [ ] System equalizer, spatial audio, EBU R128 loudness, crossfade
-- [ ] Pitch shifting and tempo independent of playback speed
-- [ ] ShazamKit recognition and Spotify playlist import
-- [ ] Last.fm / ListenBrainz scrobbling and Discord rich presence
+| Feature | web | desktop | tui |
+| --- | :---: | :---: | :---: |
+| Browse, search, explore, playlists | ✓ | ✓ | ✓ |
+| Streaming | YouTube IFrame | native (ffmpeg) | mpv |
+| Offline downloads | IndexedDB | disk | music folder |
+| Equalizer / spatial / loudness | saved audio | all audio | — |
+| Crossfade | — | ✓ | — |
+| Local file import | IndexedDB | disk | — |
+| Synced lyrics | ✓ | ✓ | ✓ |
+| Discord rich presence | — | ✓ | ✓ |
+| ListenBrainz scrobbling | — | ✓ | — |
+
+Web playback of *streamed* YouTube audio cannot be routed through Web Audio
+(the iframe is cross-origin), so the equalizer applies to downloaded and
+imported tracks. That is a browser security boundary, not a missing feature —
+everything else in the table is implemented.
+
+Still genuinely unavailable on every platform:
+
+- [ ] ShazamKit music recognition (an Android/iOS API)
+- [ ] Pitch shifting independent of tempo (needs a time-stretch stage)
+- [ ] Spotify playlist import (needs Spotify OAuth credentials)
+- [ ] Multi-account switching (the gateway keeps one signed-in session)
 - [ ] Subsonic servers and music-together sessions
-- [ ] Lyrics translation, romanization and word-by-word timing
-- [ ] Native desktop audio engine (desktop still opens tracks in the browser)
 
-These limitations are also listed inside **Settings → Web limitations**.
+These are listed inside **Settings → Platform support**.
 
 ---
 
