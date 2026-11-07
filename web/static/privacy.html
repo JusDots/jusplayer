@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JusPlayer — Privacy Policy</title>
+    <meta name="description" content="How JusPlayer handles your data: no telemetry, no tracking, your YouTube session stays with you." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%236EE7A8'/%3E%3Cpath d='M44 72V34l24-6v10L54 42v30a10 10 0 1 1-10-10z' fill='%2306100b'/%3E%3C/svg%3E" />
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        padding: 3rem 1.5rem 5rem;
+        background: #06100b;
+        color: #e6f4eb;
+        font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main { max-width: 46rem; margin: 0 auto; }
+      h1 { color: #6ee7a8; font-size: 1.9rem; margin: 0 0 .25rem; }
+      h2 { color: #b9f36b; font-size: 1.15rem; margin: 2rem 0 .5rem; }
+      .lead { color: #9db4a6; margin-top: 0; }
+      a { color: #6ee7a8; }
+      .card {
+        background: #0c1711;
+        border: 1px solid #27392e;
+        border-radius: 14px;
+        padding: 1rem 1.25rem;
+        margin: 1.25rem 0;
+      }
+      ul { padding-left: 1.1rem; }
+      li { margin: .3rem 0; }
+      footer { color: #6f8a7c; margin-top: 3rem; font-size: .9rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Privacy Policy</h1>
+      <p class="lead">JusPlayer · last updated 7 November 2026</p>
+
+      <div class="card">
+        <strong>The short version:</strong> JusPlayer has no analytics, no
+        telemetry and no advertising. Your sign-in stays on the server that
+        serves the app, and downloads you make stay on your own device.
+      </div>
+
+      <h2>What we collect</h2>
+      <ul>
+        <li><strong>Nothing, unless you sign in.</strong> Browsing, searching
+          and playing work without an account and no personal data is
+          recorded.</li>
+        <li><strong>If you sign in with Google</strong>, the gateway keeps a
+          signed session (your YouTube Music cookies and an OAuth token) in a
+          secure, HTTP-only cookie so it can ask YouTube Music for your
+          account, liked songs, library and personalised feeds.</li>
+        <li><strong>If you sign in with a YouTube cookie</strong>, that cookie
+          is stored the same way, in the same signed session.</li>
+      </ul>
+
+      <h2>What we do not do</h2>
+      <ul>
+        <li>No analytics scripts, no tracking pixels, no usage telemetry.</li>
+        <li>No selling or sharing of personal data — we have nothing to sell
+          because we collect no personal data in the first place.</li>
+        <li>No advertising and no third-party ad network.</li>
+      </ul>
+
+      <h2>Where your data lives</h2>
+      <p>
+        The web app talks to a gateway that runs on Vercel. The session cookie
+        is signed with a secret that never leaves the server, expires after 30
+        days and is deleted when you sign out. The desktop app and the
+        terminal client keep their session in their own configuration file on
+        your computer, and never send it anywhere else.
+      </p>
+
+      <h2>Downloads and local files</h2>
+      <p>
+        Tracks you download are written to your own device (your browser's
+        storage, or a folder you choose in the desktop app). Files you import
+        from your disk stay there; JusPlayer only reads them to play them.
+      </p>
+
+      <h2>Third parties</h2>
+      <p>
+        When you sign in, Google authenticates you and YouTube Music serves
+        the catalogue and the audio. Their own privacy policies apply to that
+        traffic. If you use the Discord integration, your listening status is
+        shared with Discord, and only if you configure it.
+      </p>
+
+      <h2>Your choices</h2>
+      <p>
+        Sign out at any time to delete the session. Clear your browser's
+        cookies, or delete the <code>session</code> entry in the client
+        configuration, to remove it completely. Because we keep no copy of
+        your data anywhere else, that is all it takes.
+      </p>
+
+      <h2>Contact</h2>
+      <p>
+        Questions? Open an issue on
+        <a href="https://github.com/JusDots/jusplayer">GitHub</a>.
+      </p>
+
+      <footer>
+        JusPlayer · <a href="/terms">Terms of Service</a> ·
+        <a href="/">Open the app</a>
+      </footer>
+    </main>
+  </body>
+</html>

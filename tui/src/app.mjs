@@ -8,6 +8,7 @@
  */
 
 import { Gateway, loadConfig, saveConfig } from "./api.mjs";
+import { signInWithBrowser } from "./browser-login.mjs";
 import { DiscordPresence } from "./discord.mjs";
 import { Player, ensureMusicDir } from "./player.mjs";
 import {
@@ -181,7 +182,39 @@ export class App {
         history: history.status === "fulfilled" ? flatten(history.value) : [],
       };
     }
+    this.accountSections = [
+      { key: "liked", title: "Liked songs", rows: this.accountData.liked },
+      { key: "library", title: "Library", rows: this.accountData.library },
+      { key: "history", title: "History", rows: this.accountData.history },
+    ];
+    this.accountSection = null;
+    this.rows = this.accountSections.map((section) => ({
+      title: section.title,
+      subtitle: `${section.rows.length} items`,
+      kind: "section",
+      accountSection: section.key,
+    }));
+    this.rowCursor = 0;
+    this.scroll = 0;
     this.busy = false;
+    this.render();
+  }
+
+  /** Open one of the account sections (liked songs, library, history). */
+  openSection(key) {
+    const section = (this.accountSections || []).find((item) => item.key === key);
+    if (!section) return;
+    if (!section.rows.length) {
+      this.setMessage(`There is nothing in ${section.title.toLowerCase()} yet.`, "warn");
+      this.render();
+      return;
+    }
+    this.accountSection = section;
+    this.rows = section.rows;
+    this.rowCursor = 0;
+    this.scroll = 0;
+    this.listTitle = section.title;
+    this.setMessage(`${section.rows.length} items · Esc goes back`);
     this.render();
   }
 
@@ -190,6 +223,38 @@ export class App {
     this.pasteValue = "";
     this.setMessage("Paste your YouTube cookie and press Enter (Esc cancels)");
     this.render();
+  }
+
+  /**
+   * Sign in with Google.
+   *
+   * The browser does the OAuth dance and the gateway hands the session to a
+   * loopback server in this process, which then asks the gateway to turn the
+   * ticket into a normal session.
+   */
+  async signInWithGoogle() {
+    this.busy = true;
+    this.setMessage("Opening your browser — finish the Google sign-in there");
+    this.render();
+    try {
+      const account = await signInWithBrowser({
+        base: this.gateway.base,
+        exchange: (code) => this.gateway.exchangeCode(code),
+        onWaiting: () => {
+          this.busy = false;
+          this.setMessage("Waiting for Google… (press Esc to cancel)");
+          this.render();
+        },
+      });
+      this.account = { signedIn: true, ...account };
+      this.config.session = this.gateway.cookie || "";
+      await saveConfig(this.config);
+      this.setMessage(`Signed in as ${account.name || account.email || "YouTube Music"}`);
+    } catch (error) {
+      this.setMessage(`Sign-in failed: ${error.message}`, "error");
+    }
+    this.busy = false;
+    await this.loadAccount();
   }
 
   async signInWithCookie(cookie) {
@@ -222,6 +287,35 @@ export class App {
     this.setMessage("Signed out");
     this.busy = false;
     await this.loadAccount();
+  }
+
+  /** Drop a track from the queue. */
+  removeFromQueue(index) {
+    if (index < 0 || index >= this.queue.length) return;
+    const [removed] = this.queue.splice(index, 1);
+    if (this.index === index) {
+      // The playing track was removed: stop, or move to the next one.
+      this.index = Math.min(this.index, this.queue.length - 1);
+      if (this.queue.length) this.playCurrent();
+      else this.player.stop();
+    } else if (this.index > index) {
+      this.index -= 1;
+    }
+    this.rows = this.queue;
+    this.rowCursor = Math.max(0, Math.min(this.rowCursor, this.queue.length - 1));
+    this.setMessage(`Removed “${removed?.title || "track"}” from the queue`);
+    this.render();
+  }
+
+  /** Empty the queue and stop playback. */
+  clearQueue() {
+    this.queue = [];
+    this.index = -1;
+    this.rows = this.queue;
+    this.rowCursor = 0;
+    this.player.stop();
+    this.setMessage("Queue cleared");
+    this.render();
   }
 
   async loadHome() {
@@ -304,8 +398,10 @@ export class App {
   /** Enter on a track plays it; Enter on a playlist or album opens it. */
   async activateRow(rowIndex) {
     const item = this.rows[rowIndex];
+    this.log(`activateRow ${rowIndex} -> ${item ? JSON.stringify(item).slice(0, 160) : "nothing"}`);
     if (!item) return;
     if (item.videoId) return this.playRow(rowIndex);
+    if (item.accountSection) return this.openSection(item.accountSection);
     if (item.browseId && (item.kind === "playlist" || item.kind === "album")) {
       return this.openCollection(item);
     }
@@ -491,6 +587,9 @@ export class App {
   handleKey(raw) {
     const key = raw.length === 1 ? raw : decodeSpecial(raw);
     const number = /^[0-9]$/.test(key) ? Number(key) : -1;
+    this.log(
+      `key=${JSON.stringify(key)} view=${this.view} cursor=${this.rowCursor} rows=${this.rows.length} pasting=${this.pasting}`,
+    );
 
     if (this.pasting) {
       if (key === "\r") {
@@ -570,6 +669,10 @@ export class App {
         this.activateRow(this.rowCursor);
         return;
       case "g":
+        if (this.view === "account") {
+          this.signInWithGoogle();
+          return;
+        }
         this.moveCursor(-this.rows.length);
         return;
       case "G":
@@ -589,6 +692,18 @@ export class App {
       case "\x1b[C":
         this.player.seek(this.player.state.position + 10);
         return;
+      case "x":
+        if (this.view === "queue") {
+          this.removeFromQueue(this.rowCursor);
+          return;
+        }
+        break;
+      case "c":
+        if (this.view === "queue") {
+          this.clearQueue();
+          return;
+        }
+        break;
       case "o":
         if (this.view === "account") {
           this.signOut();
@@ -629,6 +744,22 @@ export class App {
         this.render();
         return;
       case "\x1b":
+        if (this.view === "account" && this.accountSection) {
+          // Leave the open section, keep the account panel.
+          this.accountSection = null;
+          this.rows = (this.accountSections || []).map((section) => ({
+            title: section.title,
+            subtitle: `${section.rows.length} items`,
+            kind: "section",
+            accountSection: section.key,
+          }));
+          this.rowCursor = 0;
+          this.scroll = 0;
+          this.listTitle = "";
+          this.setMessage("Back to the account");
+          this.render();
+          return;
+        }
         if (this.view !== "home") {
           this.view = "home";
           this.rows = this.homeRows || [];
@@ -867,7 +998,8 @@ export class App {
     }
     for (let i = 0; i < Math.min(this.queue.length, height - lines.length); i += 1) {
       const row = this.queue[i];
-      const active = i === this.index;
+      const active = i === this.rowCursor;
+      const playing = i === this.index;
       const number = String(i + 1).padStart(2, " ");
       const titleWidth = Math.max(10, inner - 39);
       const title = pad(clip(row.title || "—", titleWidth), titleWidth);
@@ -876,6 +1008,7 @@ export class App {
         (active ? color.surfaceHigh : "") +
         (active ? color.accent : color.border) + (active ? "▌" : " ") +
         color.faint + `${number} ` +
+        (playing ? color.accent2 + "▶ " : "  ") +
         (active ? color.text + ansi.bold : color.text) + title +
         `${ansi.reset}${active ? color.surfaceHigh : ""}` +
         color.muted + ` ${pad(subtitle, 34)}`;
@@ -947,6 +1080,15 @@ export class App {
         ["?", "this help"],
         ["q", "quit"],
       ]],
+      ["account / queue", [
+        ["g", "google sign-in"],
+        ["s", "cookie sign-in"],
+        ["o", "sign out"],
+        ["x", "remove track"],
+        ["c", "clear queue"],
+        ["", ""],
+        ["", ""],
+      ]],
     ];
 
     const gap = 3;
@@ -955,7 +1097,7 @@ export class App {
       const lines = [`${color.accent2}${ansi.bold}${title.toUpperCase()}${ansi.reset}`];
       for (const [key, description] of rows) {
         lines.push(
-          `${color.accent}${pad(key, 9)}${ansi.reset}${color.text}${clip(description, columnWidth - 9)}${ansi.reset}`,
+          `${color.accent}${pad(key, 8)}${ansi.reset}${color.text}${clip(description, columnWidth - 8)}${ansi.reset}`,
         );
       }
       return lines;
@@ -983,6 +1125,31 @@ export class App {
     const inner = cols - 5;
     const lines = [];
 
+    // A section is open: show its tracks like any other list.
+    if (this.accountSection) {
+      const rows = this.accountSection.rows;
+      const numberWidth = String(Math.max(1, rows.length)).length + 1;
+      const titleWidth = Math.max(12, inner - numberWidth - 34);
+      for (let i = 0; i < Math.min(rows.length, height - 1); i += 1) {
+        const row = rows[i];
+        const active = i === this.rowCursor;
+        const number = String(i + 1).padStart(numberWidth, " ");
+        const title = pad(clip(row.title || "—", titleWidth), titleWidth);
+        const line =
+          (active ? color.surfaceHigh : "") +
+          (active ? color.accent : color.border) + (active ? "▌" : " ") +
+          color.faint + `${number} ` +
+          (active ? color.text + ansi.bold : color.text) + title +
+          `${ansi.reset}${active ? color.surfaceHigh : ""}` +
+          color.muted + ` ${clip(row.subtitle || "", 28)}`;
+        lines.push(pad(line, inner) + ansi.reset);
+      }
+      return box(lines, cols - 1, {
+        title: `${this.accountSection.title} · ${rows.length}`,
+        minHeight: height,
+      });
+    }
+
     if (this.pasting) {
       lines.push(
         `${color.accent2}${ansi.bold}cookie${ansi.reset} ${color.border}›${ansi.reset} ${color.text}${this.pasteValue}${ansi.reset}${color.accent}▏${ansi.reset}`,
@@ -998,18 +1165,28 @@ export class App {
         `${color.muted}Sign in to load your account, liked songs, library and personalised recommendations.${ansi.reset}`,
       );
       lines.push("");
+      lines.push(`${color.accent}${ansi.bold}g${ansi.reset} ${color.text}sign in with Google (opens your browser)${ansi.reset}`);
       lines.push(`${color.accent}${ansi.bold}s${ansi.reset} ${color.text}sign in with a YouTube cookie${ansi.reset}`);
       lines.push(`${color.accent}${ansi.bold}r${ansi.reset} ${color.text}refresh the account${ansi.reset}`);
     } else {
-      const data = this.accountData || { liked: [], library: [], history: [] };
       lines.push(`${color.text}${ansi.bold}${this.account.name || "YouTube Music"}${ansi.reset}`);
       if (this.account.email) lines.push(`${color.muted}${this.account.email}${ansi.reset}`);
       lines.push("");
-      const count = (items) => `${items.length} item${items.length === 1 ? "" : "s"}`;
-      lines.push(`${color.accent2}${ansi.bold}LIKED SONGS${ansi.reset}  ${color.muted}${count(data.liked)}${ansi.reset}`);
-      lines.push(`${color.accent2}${ansi.bold}LIBRARY${ansi.reset}      ${color.muted}${count(data.library)}${ansi.reset}`);
-      lines.push(`${color.accent2}${ansi.bold}HISTORY${ansi.reset}      ${color.muted}${count(data.history)}${ansi.reset}`);
+      lines.push(`${color.faint} ${pad("#", 3)} ${pad("SECTION", 22)} ${pad("ITEMS", 7)}${ansi.reset}`);
+      (this.accountSections || []).forEach((section, index) => {
+        const active = index === this.rowCursor;
+        const number = String(index + 1).padStart(3, " ");
+        const line =
+          (active ? color.surfaceHigh : "") +
+          (active ? color.accent : color.border) + (active ? "▌" : " ") +
+          color.faint + `${number} ` +
+          (active ? color.text + ansi.bold : color.text) + pad(section.title, 22) +
+          `${ansi.reset}${active ? color.surfaceHigh : ""}` +
+          color.muted + ` ${pad(String(section.rows.length), 7)}`;
+        lines.push(pad(line, inner) + ansi.reset);
+      });
       lines.push("");
+      lines.push(`${color.accent}${ansi.bold}enter${ansi.reset} ${color.text}open the selected section${ansi.reset}`);
       lines.push(`${color.accent}${ansi.bold}o${ansi.reset} ${color.text}sign out${ansi.reset}`);
       lines.push(`${color.accent}${ansi.bold}r${ansi.reset} ${color.text}refresh${ansi.reset}`);
     }

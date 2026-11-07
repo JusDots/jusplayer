@@ -39,24 +39,35 @@ without scrolling.
 | `e` | restart the track |
 | `w` | download the track |
 | `r` | reload the current view |
+| `g` | (account view) sign in with Google — opens your browser |
 | `s` | (account view) sign in with a YouTube cookie |
 | `o` | (account view) sign out |
+| `x` | (queue view) remove the selected track |
+| `c` | (queue view) clear the queue |
 | `?` | help |
 | `q` / `ctrl-c` | quit |
 
 ## Signing in
 
-Press `a` for the account view. A terminal cannot hand a browser session back
-to the client, so the client signs in with a YouTube cookie:
+Press `a` for the account view. Two ways to sign in:
+
+**Google (`g`)** — the client starts a tiny web server on `127.0.0.1`, asks
+the gateway to run the OAuth flow and names that loopback address. The
+browser does the Google part, the gateway hands the finished session to the
+loopback address as a short-lived ticket, and the client exchanges the
+ticket for a normal session — no cookie copying, no second window to close.
+
+**A YouTube cookie (`s`)** — for terminals on a machine where opening a
+browser is not practical:
 
 1. Open <https://music.youtube.com> in a browser and sign in.
 2. Copy the whole `Cookie` request header (or at least `VISITOR_INFO1_LIVE`,
    `SIDCC` and `__Secure-3PAPISID`) from the signed-in tab.
-3. Paste it in the client — the session is stored in the config file and the
-   account, liked songs, library and personalised feeds become available.
+3. Paste it in the client — the session is stored in the config file.
 
-The hosted gateway can also sign you in with Google from the web app; that
-session lives in the browser, so the terminal client keeps its own.
+Either way the session is remembered in the config file, so the next start is
+signed in already, and the account view opens **Liked songs**, **Library** and
+**History** with `enter`.
 
 ## Configuration
 

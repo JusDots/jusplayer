@@ -150,4 +150,13 @@ console.log("▸ Staging the client in public/ …");
 await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
 await cp(dist, out, { recursive: true });
+
+// The privacy policy and terms of service live next to the app: Google's
+// consent screen asks for real URLs for both.
+const staticDir = path.join(root, "web", "static");
+if (await exists(staticDir)) {
+  await cp(staticDir, out, { recursive: true });
+  console.log("  + privacy policy and terms of service");
+}
+
 console.log(`✓ ${path.relative(root, out)} is ready for Vercel.`);

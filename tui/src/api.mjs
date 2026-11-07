@@ -215,6 +215,22 @@ export class Gateway {
     return this._request(`/api/stream?videoId=${encodeURIComponent(videoId)}`);
   }
 
+  /** URL that starts the Google sign-in flow in the gateway. */
+  loginUrl(next = "") {
+    const base = `${this.base}/api/auth/login`;
+    return next ? `${base}?next=${encodeURIComponent(next)}` : base;
+  }
+
+  /**
+   * Trade the ticket from the loopback redirect for a real session.
+   *
+   * The gateway answers with the `jus_session` cookie, which the client
+   * picks up like any other response.
+   */
+  exchangeCode(code) {
+    return this._request(`/api/auth/exchange?code=${encodeURIComponent(code)}`);
+  }
+
   /** Sign in with a pasted YouTube cookie. */
   signInWithCookie(cookie) {
     return this._request("/api/auth/cookie", { method: "POST", body: { cookie } });

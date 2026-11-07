@@ -34,6 +34,7 @@ import {
   parseCookies,
   refreshAccessToken,
   sessionCookieHeader,
+  signSession,
   streamToken,
   verifySession,
   verifyStreamToken,
@@ -1430,6 +1431,44 @@ function requestOrigin(req, url) {
 }
 
 /**
+ * Only loopback addresses may receive a finished sign-in.
+ *
+ * The desktop app and the terminal client run a tiny HTTP server on
+ * 127.0.0.1 and ask the gateway to send the session there. Anything that is
+ * not a loopback URL is ignored, so a hostile `next` parameter can never
+ * mail somebody else's session to a server of their choosing.
+ */
+function loopbackTarget(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "";
+  }
+  if (url.protocol !== "http:") return "";
+  const host = url.hostname.toLowerCase();
+  if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(host)) return "";
+  if (!url.port) return "";
+  return url.toString();
+}
+
+/**
+ * A short-lived ticket that carries a fresh session to a loopback client.
+ *
+ * The ticket is signed (like the session cookie) instead of being kept in
+ * memory, because a serverless function may be a different process by the
+ * time the client comes back to exchange it.
+ */
+function createHandoffToken(user, secret, ttlMs = 5 * 60 * 1000) {
+  return signSession(
+    { kind: "handoff", exp: Date.now() + ttlMs, ...user },
+    secret,
+  );
+}
+
+/**
  * The one entry point used by both the local Node server and the Vercel
  * function. `options.static` turns the built Wasm app on; on Vercel the files
  * are served straight from `public/` instead.
@@ -1476,10 +1515,19 @@ export async function handleRequest(req, res, options = {}) {
           hint: "Set YT_CLIENT_ID and YT_CLIENT_SECRET, or sign in with a YouTube cookie instead.",
         });
       }
+      // A desktop app or a terminal client can ask for the session to be
+      // handed to a loopback address instead of to the web app.
+      const next = loopbackTarget(url.searchParams.get("next"));
       const state = oauthState();
+      // The state is signed so that the `next` address cannot be forged by
+      // anyone who can write a cookie.
+      const stateCookie = signSession(
+        { kind: "oauth-state", st: state, next, exp: Date.now() + 10 * 60 * 1000 },
+        SECRET,
+      );
       res.setHeader(
         "set-cookie",
-        sessionCookieHeader(state, { secure: isSecure, maxAge: 10 * 60 * 1000 }),
+        sessionCookieHeader(stateCookie, { secure: isSecure, maxAge: 10 * 60 * 1000 }),
       );
       return redirect(res, oauthUrl({ clientId: process.env.YT_CLIENT_ID, redirectUri, state }));
     }
@@ -1502,7 +1550,16 @@ export async function handleRequest(req, res, options = {}) {
       const state = url.searchParams.get("state");
       const cookies = parseCookies(req.headers.cookie || "");
       if (!code) return redirect(res, "/?signin=denied");
-      if (!state || cookies[SESSION_COOKIE] !== state) {
+
+      // The state cookie is signed: it carries the loopback address a desktop
+      // app or a terminal client wants the session handed to.
+      const stateCookie = cookies[SESSION_COOKIE] || "";
+      const statePayload = verifySession(stateCookie, SECRET);
+      let next = "";
+      if (statePayload?.kind === "oauth-state") {
+        if (statePayload.st !== state) return redirect(res, "/?signin=bad_state");
+        next = statePayload.next || "";
+      } else if (stateCookie !== state) {
         return redirect(res, "/?signin=bad_state");
       }
 
@@ -1539,7 +1596,17 @@ export async function handleRequest(req, res, options = {}) {
           email: profile?.email || "",
           avatar: profile?.avatar || "",
         };
-        res.setHeader("set-cookie", sessionCookieHeader(createSession(cookie, user, SECRET), { secure: isSecure }));
+        const sessionToken = createSession(cookie, user, SECRET);
+        res.setHeader("set-cookie", sessionCookieHeader(sessionToken, { secure: isSecure }));
+
+        // A desktop app or a terminal client is waiting on a loopback
+        // address: hand it a short-lived ticket instead of the web app.
+        if (next) {
+          const ticket = createHandoffToken(user, SECRET);
+          const separator = next.includes("?") ? "&" : "?";
+          return redirect(res, `${next}${separator}code=${encodeURIComponent(ticket)}`);
+        }
+
         return redirect(res, "/?signin=ok");
       } catch (err) {
         console.warn(`[auth] oauth ${stage} failed:`, err.message);
@@ -1548,6 +1615,35 @@ export async function handleRequest(req, res, options = {}) {
           `/?signin=error&stage=${encodeURIComponent(stage)}&reason=${encodeURIComponent(err.message)}`,
         );
       }
+    }
+
+    if (url.pathname === "/api/auth/exchange") {
+      // The desktop app and the terminal client come back with the ticket
+      // that the loopback redirect carried, and get a normal session.
+      const ticket = url.searchParams.get("code") || "";
+      const payload = verifySession(ticket, SECRET);
+      if (!payload || payload.kind !== "handoff") {
+        return sendJson(res, 400, {
+          error: "That sign-in ticket is not valid any more — please try again.",
+        });
+      }
+      const token = createSession(payload.yt || "", {
+        oauth: payload.oauth,
+        name: payload.name,
+        email: payload.email,
+        avatar: payload.avatar,
+      }, SECRET);
+      res.setHeader("set-cookie", sessionCookieHeader(token, { secure: isSecure }));
+      const info = await accountInfo(
+        payload.yt || bearerToken(payload.oauth?.accessToken ? `Bearer ${payload.oauth.accessToken}` : "") || "",
+        { name: payload.name, email: payload.email, avatar: payload.avatar },
+      );
+      return sendJson(res, 200, {
+        ...info,
+        signedIn: true,
+        method: payload.oauth?.accessToken ? "google" : "cookie",
+        oauthAvailable: oauthConfigured(),
+      });
     }
 
     if (url.pathname === "/api/auth/logout") {
