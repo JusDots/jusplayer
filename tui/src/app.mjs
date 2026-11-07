@@ -7,7 +7,7 @@
  * escapes, and the app is a single state machine fed by raw keypresses.
  */
 
-import { Gateway, loadConfig } from "./api.mjs";
+import { Gateway, loadConfig, saveConfig } from "./api.mjs";
 import { DiscordPresence } from "./discord.mjs";
 import { Player, ensureMusicDir } from "./player.mjs";
 import {
@@ -26,7 +26,7 @@ import {
   width,
 } from "./ui.mjs";
 
-const VIEWS = ["home", "search", "library", "queue", "lyrics", "help"];
+const VIEWS = ["home", "search", "library", "queue", "lyrics", "account", "help"];
 
 const KEYS = {
   home: { key: "h", label: "home" },
@@ -34,6 +34,7 @@ const KEYS = {
   library: { key: "l", label: "library" },
   queue: { key: "u", label: "queue" },
   lyrics: { key: "y", label: "lyrics" },
+  account: { key: "a", label: "account" },
   help: { key: "?", label: "help" },
 };
 
@@ -52,7 +53,10 @@ export class App {
     this.scroll = 0;
     this.status = "starting…";
     this.account = null;
+    this.accountData = null;
     this.busy = false;
+    this.pasting = false;
+    this.pasteValue = "";
 
     this.query = "";
     this.searchResults = [];
@@ -96,6 +100,9 @@ export class App {
     if (this.player.backend === "none") {
       this.setMessage("No audio backend found (install mpv or ffmpeg). Browsing still works.", "warn");
     }
+
+    // A session remembered from an earlier run.
+    if (this.config.session) this.gateway.cookie = this.config.session;
 
     await this.refreshAccount();
     await this.loadHome();
@@ -142,6 +149,79 @@ export class App {
       this.account = null;
       this.status = `gateway unreachable: ${error.message}`;
     }
+  }
+
+  /**
+   * The account view.
+   *
+   * A terminal cannot open a browser window that hands the session back, so
+   * signing in happens with a YouTube cookie: paste it once and the session
+   * is remembered in the config file.
+   */
+  async loadAccount() {
+    this.busy = true;
+    this.render();
+    await this.refreshAccount();
+
+    this.accountData = { liked: [], library: [], history: [] };
+    try {
+      this.health = await this.gateway.health();
+    } catch {
+      this.health = null;
+    }
+    if (this.account?.signedIn) {
+      const [liked, library, history] = await Promise.allSettled([
+        this.gateway.liked(),
+        this.gateway.library(),
+        this.gateway.history(),
+      ]);
+      this.accountData = {
+        liked: liked.status === "fulfilled" ? flatten(liked.value) : [],
+        library: library.status === "fulfilled" ? flatten(library.value) : [],
+        history: history.status === "fulfilled" ? flatten(history.value) : [],
+      };
+    }
+    this.busy = false;
+    this.render();
+  }
+
+  startCookiePaste() {
+    this.pasting = true;
+    this.pasteValue = "";
+    this.setMessage("Paste your YouTube cookie and press Enter (Esc cancels)");
+    this.render();
+  }
+
+  async signInWithCookie(cookie) {
+    this.busy = true;
+    this.render();
+    try {
+      const info = await this.gateway.signInWithCookie(cookie);
+      this.account = { signedIn: true, ...info };
+      this.config.session = this.gateway.cookie || "";
+      await saveConfig(this.config);
+      this.setMessage(`Signed in as ${info.name || info.email || "YouTube Music"}`);
+    } catch (error) {
+      this.setMessage(`Sign-in failed: ${error.message}`, "error");
+    }
+    this.busy = false;
+    await this.loadAccount();
+  }
+
+  async signOut() {
+    this.busy = true;
+    this.render();
+    try {
+      await this.gateway.logout();
+    } catch {
+      /* the session may already be gone */
+    }
+    this.gateway.cookie = null;
+    this.config.session = "";
+    await saveConfig(this.config);
+    this.setMessage("Signed out");
+    this.busy = false;
+    await this.loadAccount();
   }
 
   async loadHome() {
@@ -412,6 +492,31 @@ export class App {
     const key = raw.length === 1 ? raw : decodeSpecial(raw);
     const number = /^[0-9]$/.test(key) ? Number(key) : -1;
 
+    if (this.pasting) {
+      if (key === "\r") {
+        const value = this.pasteValue;
+        this.pasting = false;
+        this.pasteValue = "";
+        if (value.trim()) this.signInWithCookie(value.trim());
+        return;
+      }
+      if (key === "\x1b") {
+        this.pasting = false;
+        this.pasteValue = "";
+        this.setMessage("Sign-in cancelled");
+        return;
+      }
+      if (key === "\x7f") {
+        this.pasteValue = this.pasteValue.slice(0, -1);
+        return;
+      }
+      if (key.length === 1 && key >= " ") {
+        this.pasteValue += key;
+        return;
+      }
+      return;
+    }
+
     if (this.view === "search" && this.searching) {
       if (key === "\r") {
         this.searching = false;
@@ -473,6 +578,10 @@ export class App {
       case "s":
       case "left":
       case "\x1b[D":
+        if (this.view === "account") {
+          this.startCookiePaste();
+          return;
+        }
         this.player.seek(this.player.state.position - 10);
         return;
       case "d":
@@ -480,6 +589,12 @@ export class App {
       case "\x1b[C":
         this.player.seek(this.player.state.position + 10);
         return;
+      case "o":
+        if (this.view === "account") {
+          this.signOut();
+          return;
+        }
+        break;
       case "e":
         this.player.seek(0);
         return;
@@ -556,6 +671,8 @@ export class App {
         this.query = "";
         this.setMessage("Type a search and press Enter (Esc to cancel)");
       }
+    } else if (name === "account") {
+      await this.loadAccount();
     } else {
       this.render();
     }
@@ -564,6 +681,7 @@ export class App {
   async reload() {
     if (this.view === "home") await this.loadHome();
     else if (this.view === "library") await this.loadLibrary();
+    else if (this.view === "account") await this.loadAccount();
     else if (this.view === "search" && this.query) await this.runSearch(this.query);
     else this.setMessage("Nothing to refresh");
     this.render();
@@ -673,6 +791,7 @@ export class App {
     if (this.view === "help") return this.drawHelp(cols, height);
     if (this.view === "lyrics") return this.drawLyrics(cols, height);
     if (this.view === "queue") return this.drawQueue(cols, height);
+    if (this.view === "account") return this.drawAccount(cols, height);
     return this.drawList(cols, height);
   }
 
@@ -824,6 +943,7 @@ export class App {
         ["l", "library"],
         ["u", "queue"],
         ["y", "lyrics"],
+        ["a", "account"],
         ["?", "this help"],
         ["q", "quit"],
       ]],
@@ -857,6 +977,51 @@ export class App {
     );
 
     return box(lines.slice(0, Math.max(0, height)), cols - 1, { title: "keyboard shortcuts", minHeight: height });
+  }
+
+  drawAccount(cols, height) {
+    const inner = cols - 5;
+    const lines = [];
+
+    if (this.pasting) {
+      lines.push(
+        `${color.accent2}${ansi.bold}cookie${ansi.reset} ${color.border}›${ansi.reset} ${color.text}${this.pasteValue}${ansi.reset}${color.accent}▏${ansi.reset}`,
+      );
+      lines.push("");
+      lines.push(
+        `${color.faint}In a signed-in youtube.com tab copy the whole Cookie header (or just the VISITOR_INFO1_LIVE, SIDCC and __Secure-3PAPISID values) and paste it here.${ansi.reset}`,
+      );
+    } else if (!this.account?.signedIn) {
+      lines.push(`${color.text}${ansi.bold}Not signed in${ansi.reset}`);
+      lines.push("");
+      lines.push(
+        `${color.muted}Sign in to load your account, liked songs, library and personalised recommendations.${ansi.reset}`,
+      );
+      lines.push("");
+      lines.push(`${color.accent}${ansi.bold}s${ansi.reset} ${color.text}sign in with a YouTube cookie${ansi.reset}`);
+      lines.push(`${color.accent}${ansi.bold}r${ansi.reset} ${color.text}refresh the account${ansi.reset}`);
+    } else {
+      const data = this.accountData || { liked: [], library: [], history: [] };
+      lines.push(`${color.text}${ansi.bold}${this.account.name || "YouTube Music"}${ansi.reset}`);
+      if (this.account.email) lines.push(`${color.muted}${this.account.email}${ansi.reset}`);
+      lines.push("");
+      const count = (items) => `${items.length} item${items.length === 1 ? "" : "s"}`;
+      lines.push(`${color.accent2}${ansi.bold}LIKED SONGS${ansi.reset}  ${color.muted}${count(data.liked)}${ansi.reset}`);
+      lines.push(`${color.accent2}${ansi.bold}LIBRARY${ansi.reset}      ${color.muted}${count(data.library)}${ansi.reset}`);
+      lines.push(`${color.accent2}${ansi.bold}HISTORY${ansi.reset}      ${color.muted}${count(data.history)}${ansi.reset}`);
+      lines.push("");
+      lines.push(`${color.accent}${ansi.bold}o${ansi.reset} ${color.text}sign out${ansi.reset}`);
+      lines.push(`${color.accent}${ansi.bold}r${ansi.reset} ${color.text}refresh${ansi.reset}`);
+    }
+
+    lines.push("");
+    const whole = this.health?.wholeTracks;
+    lines.push(
+      `${color.faint}gateway${ansi.reset} ${color.text}${this.gateway.base}${ansi.reset}   ` +
+        `${color.faint}whole tracks${ansi.reset} ${color.text}${whole === undefined ? "?" : whole ? "yes" : "no"}${ansi.reset}`,
+    );
+
+    return box(lines.slice(0, Math.max(0, height)), cols - 1, { title: "account", minHeight: height });
   }
 
   drawFooter(cols) {

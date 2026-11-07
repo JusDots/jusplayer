@@ -34,13 +34,29 @@ without scrolling.
 | `j` / `k`, `g` / `G` | move down / up, jump to top / bottom |
 | `enter` | open the selected row |
 | `/` | search |
-| `h` `l` `u` `y` | home · library · queue · lyrics |
+| `h` `l` `u` `y` `a` | home · library · queue · lyrics · account |
 | `+` / `-` / `m` | volume up / down / mute |
 | `e` | restart the track |
 | `w` | download the track |
 | `r` | reload the current view |
+| `s` | (account view) sign in with a YouTube cookie |
+| `o` | (account view) sign out |
 | `?` | help |
 | `q` / `ctrl-c` | quit |
+
+## Signing in
+
+Press `a` for the account view. A terminal cannot hand a browser session back
+to the client, so the client signs in with a YouTube cookie:
+
+1. Open <https://music.youtube.com> in a browser and sign in.
+2. Copy the whole `Cookie` request header (or at least `VISITOR_INFO1_LIVE`,
+   `SIDCC` and `__Secure-3PAPISID`) from the signed-in tab.
+3. Paste it in the client — the session is stored in the config file and the
+   account, liked songs, library and personalised feeds become available.
+
+The hosted gateway can also sign you in with Google from the web app; that
+session lives in the browser, so the terminal client keeps its own.
 
 ## Configuration
 
@@ -52,19 +68,23 @@ Windows), or `$JUSPLAYER_CONFIG`:
   "base": "http://127.0.0.1:8787",
   "player": "mpv",
   "musicDir": "/home/you/Music/JusPlayer",
-  "discordClientId": "000000000000000000"
+  "discordClientId": "000000000000000000",
+  "session": "jus_session=…"
 }
 ```
 
 Environment overrides: `JUSPLAYER_API`, `JUSPLAYER_DISCORD_CLIENT_ID`,
 `JUSPLAYER_CONFIG`.
 
-- The gateway defaults to <http://127.0.0.1:8787>; run
-  `cd server && npm start`, or pass `--api https://jusplayer.vercel.app`. The
-  local gateway plays whole tracks, the hosted one is limited to the range
-  YouTube serves without a PO token.
+- The gateway is chosen automatically: a gateway running on
+  <http://127.0.0.1:8787> is preferred, otherwise the hosted one at
+  <https://jusplayer.vercel.app> is used, so the client works with no setup.
+  Pass `--api <url>` to pick another one.
+- The hosted gateway resolves whole tracks (it ships `yt-dlp`), so playback
+  and downloads are not cut short.
 - Sign-in reuses the gateway's signed session cookie: the client keeps
-  `jus_session` in memory after a cookie sign-in.
+  `jus_session` in memory after a cookie sign-in and writes it to the config
+  file so the next start is signed in already.
 - Downloads land in `musicDir` (default `~/Music/JusPlayer`).
 
 ## Backends

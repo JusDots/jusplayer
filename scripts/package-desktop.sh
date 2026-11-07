@@ -38,19 +38,41 @@ mkdir -p dist
 tar -C "$(dirname "$APP")" -czf dist/jusplayer-linux-x64.tar.gz "$(basename "$APP")"
 echo "→ dist/jusplayer-linux-x64.tar.gz"
 
-if [[ "${1:-}" == "--deb" ]]; then
+# Flags: --deb, --rpm; everything else is forwarded to Gradle.
+MAKE_DEB=0
+MAKE_RPM=0
+GRADLE_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --deb) MAKE_DEB=1 ;;
+    --rpm) MAKE_RPM=1 ;;
+    --all) MAKE_DEB=1; MAKE_RPM=1 ;;
+    *) GRADLE_ARGS+=("$arg") ;;
+  esac
+done
+if [[ $MAKE_DEB -eq 0 && $MAKE_RPM -eq 0 && ${#GRADLE_ARGS[@]} -eq 0 ]]; then
+  MAKE_DEB=1
+  MAKE_RPM=1
+fi
+
+if [[ $MAKE_DEB -eq 1 ]]; then
   if ! command -v dpkg-deb >/dev/null 2>&1; then
     echo "Skipping .deb: install dpkg (and fakeroot) first." >&2
   else
-    ./gradlew :linux:packageDeb --console=plain || true
+    ./gradlew :linux:packageDeb --console=plain "${GRADLE_ARGS[@]+"${GRADLE_ARGS[@]}"}" || true
   fi
+fi
+
+if [[ $MAKE_RPM -eq 1 ]]; then
   if ! command -v rpmbuild >/dev/null 2>&1; then
     echo "Skipping .rpm: install rpm-tools first." >&2
   else
-    ./gradlew :linux:packageRpm --console=plain || true
+    ./gradlew :linux:packageRpm --console=plain "${GRADLE_ARGS[@]+"${GRADLE_ARGS[@]}"}" || true
   fi
-  find linux/build/compose/binaries/main -maxdepth 2 \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} dist/ \; 2>/dev/null || true
 fi
+
+find linux/build/compose/binaries/main -maxdepth 2 \( -name '*.deb' -o -name '*.rpm' \) \
+  -exec cp {} dist/ \; 2>/dev/null || true
 
 cat <<'EOF'
 

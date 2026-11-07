@@ -5,11 +5,38 @@
  * apps, so anything you can do in the browser you can do here.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_BASE = process.env.JUSPLAYER_API || "http://127.0.0.1:8787";
+const LOCAL_BASE = "http://127.0.0.1:8787";
+const LIVE_BASE = "https://jusplayer.vercel.app";
+const DEFAULT_BASE = process.env.JUSPLAYER_API || LOCAL_BASE;
+
+/** Is a gateway answering on this address? */
+export async function gatewayAlive(base, timeoutMs = 1500) {
+  try {
+    const response = await fetch(`${base}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pick a gateway.
+ *
+ * A gateway running on this machine is preferred — it is faster and can
+ * resolve whole tracks. Otherwise the hosted one is used, so the client
+ * works out of the box with no setup.
+ */
+export async function resolveBase() {
+  if (process.env.JUSPLAYER_API) return process.env.JUSPLAYER_API;
+  if (await gatewayAlive(LOCAL_BASE)) return LOCAL_BASE;
+  return LIVE_BASE;
+}
 
 /** Config lives next to the user's other dotfiles. */
 export async function configPath() {
@@ -28,16 +55,34 @@ export async function loadConfig() {
     discordClientId: "",
     player: "auto",
     musicDir: path.join(os.homedir(), "Music", "JusPlayer"),
+    session: "",
   };
+  let savedBase = "";
   try {
     const raw = await readFile(await configPath(), "utf8");
     Object.assign(config, JSON.parse(raw));
+    savedBase = String(config.base || "");
   } catch {
     /* no config yet — the defaults are fine */
   }
-  if (process.env.JUSPLAYER_API) config.base = process.env.JUSPLAYER_API;
+  if (process.env.JUSPLAYER_API) {
+    config.base = process.env.JUSPLAYER_API;
+  } else if (!savedBase) {
+    // Nothing was chosen by hand: use a local gateway when there is one,
+    // otherwise the hosted one so the client works straight away.
+    config.base = await resolveBase();
+  }
   if (process.env.JUSPLAYER_DISCORD_CLIENT_ID) config.discordClientId = process.env.JUSPLAYER_DISCORD_CLIENT_ID;
   return config;
+}
+
+/** Write the configuration back to disk (sessions, preferences). */
+export async function saveConfig(config) {
+  const target = await configPath();
+  await mkdir(path.dirname(target), { recursive: true });
+  const clean = { ...config };
+  delete clean.base; // the base is chosen automatically, not persisted
+  await writeFile(target, `${JSON.stringify(clean, null, 2)}\n`, "utf8");
 }
 
 export class Gateway {
